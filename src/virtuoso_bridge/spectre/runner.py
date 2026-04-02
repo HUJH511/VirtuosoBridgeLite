@@ -242,6 +242,7 @@ def _run_spectre_remote(
         log_file=remote_log_file,
     )
     spectre_command = " ".join(shlex.quote(arg) for arg in spectre_argv)
+    logger.info("[remote] %s", spectre_command)
     print(f"[Command] {spectre_command}")
     print("[Exec] Remote simulation running...")
     if template and template.exists():
@@ -283,6 +284,7 @@ def _run_spectre_remote(
     else:
         exec_cmd = f"cd {shlex.quote(remote_dir)} && {spectre_command}"
 
+    logger.info("[remote] %s", exec_cmd)
     task = run_remote_task(
         runner,
         work_dir_base=remote_work_dir,

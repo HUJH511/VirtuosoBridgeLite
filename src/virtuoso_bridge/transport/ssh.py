@@ -178,7 +178,7 @@ class SSHRunner:
         return self._run_command_once(command, timeout=timeout)
 
     def _print_cmd(self, cmd: list[str]) -> None:
-        logger.debug("[cmd] %s", " ".join(cmd))
+        logger.info("[local] %s", " ".join(cmd))
         if self._verbose:
             print(f"[cmd] {' '.join(cmd)}", flush=True)
 
@@ -190,7 +190,7 @@ class SSHRunner:
         # interpret it, breaking sh syntax (&&, ${VAR:-}, etc.) if login=csh.
         cmd = self._build_ssh_base() + ["sh"]
         self._print_cmd(cmd)
-        logger.debug("Running remote command: %s", cmd)
+        logger.info("[server] %s", command)
         result = subprocess.run(
             cmd,
             input=command,
@@ -626,6 +626,7 @@ class SSHRunner:
         if proc is None or proc.stdin is None or proc.poll() is not None or out_queue is None:
             raise RuntimeError("Persistent SSH shell is not running.")
 
+        logger.info("[server] %s", command)
         if self._verbose:
             # Show a compact summary: first non-empty, non-mkdir, non-probe line
             lines = [l.strip() for l in command.splitlines() if l.strip()]
