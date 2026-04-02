@@ -1,4 +1,4 @@
-"""RAMICBridge – Python client for Virtuoso SKILL execution."""
+"""VirtuosoClient – Python client for Virtuoso SKILL execution."""
 
 from __future__ import annotations
 
@@ -62,14 +62,14 @@ def _escape_for_skill_evalstring_source(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# RAMICBridge — pure SKILL execution client
+# VirtuosoClient — pure SKILL execution client
 # ---------------------------------------------------------------------------
 
-class RAMICBridge(VirtuosoInterface):
+class VirtuosoClient(VirtuosoInterface):
     """Virtuoso SKILL bridge using the RAMIC daemon over TCP.
 
     This class only handles TCP communication with the daemon.
-    SSH tunnel management is handled separately by TunnelService.
+    SSH tunnel management is handled separately by SSHClient.
     """
 
     def __init__(
@@ -83,7 +83,7 @@ class RAMICBridge(VirtuosoInterface):
         self._host = host
         self._port = port
         self._timeout = timeout
-        self._tunnel = tunnel  # TunnelService, if provided
+        self._tunnel = tunnel  # SSHClient, if provided
         self._log_to_ciw = log_to_ciw
         self.layout = LayoutOps(self)
         self.schematic = SchematicOps(self)
@@ -104,18 +104,18 @@ class RAMICBridge(VirtuosoInterface):
         auto_setup: bool = True,
         keep_remote_files: bool = False,
         log_to_ciw: bool = True,
-    ) -> "RAMICBridge":
+    ) -> "VirtuosoClient":
         """Create a remote bridge from environment variables.
 
-        Creates a TunnelService internally for backward compatibility.
+        Creates a SSHClient internally for backward compatibility.
         """
         load_dotenv()
         remote_host = os.getenv("VB_REMOTE_HOST", "").strip()
         if not remote_host:
             raise RuntimeError("VB_REMOTE_HOST must be set")
 
-        from virtuoso_bridge.transport.tunnel import TunnelService
-        tunnel = TunnelService.from_env(keep_remote_files=keep_remote_files)
+        from virtuoso_bridge.transport.tunnel import SSHClient
+        tunnel = SSHClient.from_env(keep_remote_files=keep_remote_files)
 
         return cls(
             host="127.0.0.1",
@@ -131,7 +131,7 @@ class RAMICBridge(VirtuosoInterface):
         host: str = "127.0.0.1",
         port: int = 65432,
         timeout: int = 30,
-    ) -> "RAMICBridge":
+    ) -> "VirtuosoClient":
         """Create a bridge for a locally running daemon."""
         return cls(host=host, port=port, timeout=timeout)
 
@@ -141,8 +141,8 @@ class RAMICBridge(VirtuosoInterface):
         tunnel: Any,
         timeout: int = 30,
         log_to_ciw: bool = True,
-    ) -> "RAMICBridge":
-        """Create a bridge connected through a TunnelService."""
+    ) -> "VirtuosoClient":
+        """Create a bridge connected through a SSHClient."""
         return cls(
             host="127.0.0.1",
             port=tunnel.port,
@@ -153,7 +153,7 @@ class RAMICBridge(VirtuosoInterface):
 
     # -- context manager ----------------------------------------------------
 
-    def __enter__(self) -> "RAMICBridge":
+    def __enter__(self) -> "VirtuosoClient":
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -615,7 +615,7 @@ class RAMICBridge(VirtuosoInterface):
     # -- cleanup ------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the bridge. Tunnel cleanup is handled by TunnelService."""
+        """Close the bridge. Tunnel cleanup is handled by SSHClient."""
         if self._tunnel is not None:
             try:
                 self._tunnel.close()

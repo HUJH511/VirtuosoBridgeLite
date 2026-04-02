@@ -60,19 +60,19 @@ The bridge is two independent layers:
 │  BridgeClient   │          │   RAMIC daemon (Python)          │
 │       │         │          │       │                          │
 │       ▼         │          │       ▼                          │
-│  RAMICBridge    │──TCP───► │   evalstring() in Virtuoso       │
+│  VirtuosoClient    │──TCP───► │   evalstring() in Virtuoso       │
 │  (pure TCP)     │          │                                  │
 │                 │          │                                  │
-│  TunnelService  │──SSH───► │   (port forward + file transfer) │
+│  SSHClient  │──SSH───► │   (port forward + file transfer) │
 │  (SSH tunnel)   │          │                                  │
 └─────────────────┘          └──────────────────────────────────┘
 ```
 
-- **RAMICBridge** — pure TCP SKILL client. No SSH awareness. Sends SKILL over TCP, gets results.
-- **TunnelService** — manages SSH tunnel, uploads daemon to remote, handles file transfer. Provides the `localhost:port` endpoint that RAMICBridge connects to.
-- **BridgeClient** — thin JSON client that talks to the BridgeService (which wraps RAMICBridge + TunnelService).
+- **VirtuosoClient** — pure TCP SKILL client. No SSH awareness. Sends SKILL over TCP, gets results.
+- **SSHClient** — manages SSH tunnel, uploads daemon to remote, handles file transfer. Provides the `localhost:port` endpoint that VirtuosoClient connects to.
+- **BridgeClient** — thin JSON client that talks to the BridgeService (which wraps VirtuosoClient + SSHClient).
 
-These two layers are fully decoupled: RAMICBridge works with any TCP endpoint (SSH tunnel, VPN, direct LAN, local).
+These two layers are fully decoupled: VirtuosoClient works with any TCP endpoint (SSH tunnel, VPN, direct LAN, local).
 
 > Want to understand the raw mechanism? See [`core/`](core/) — the entire bridge distilled into 3 files (180 lines).
 
@@ -81,9 +81,9 @@ These two layers are fully decoupled: RAMICBridge works with any TCP endpoint (S
 If Virtuoso runs on your local machine:
 
 ```python
-from virtuoso_bridge import RAMICBridge
+from virtuoso_bridge import VirtuosoClient
 
-bridge = RAMICBridge.local(port=65432)
+bridge = VirtuosoClient.local(port=65432)
 bridge.execute_skill("1+2")
 ```
 

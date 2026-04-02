@@ -1,8 +1,8 @@
-"""TunnelService — SSH tunnel + remote RAMIC daemon deployment.
+"""SSHClient — SSH tunnel + remote RAMIC daemon deployment.
 
 Manages the SSH port-forward tunnel and remote file deployment independently
-from the SKILL execution client (RAMICBridge). RAMICBridge only needs a
-localhost:port TCP endpoint; TunnelService makes that endpoint available.
+from the SKILL execution client (VirtuosoClient). VirtuosoClient only needs a
+localhost:port TCP endpoint; SSHClient makes that endpoint available.
 """
 
 from __future__ import annotations
@@ -103,10 +103,10 @@ def _update_env_file(key: str, value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# TunnelService
+# SSHClient
 # ---------------------------------------------------------------------------
 
-class TunnelService:
+class SSHClient:
     """Manages SSH tunnel and remote RAMIC daemon deployment.
 
     Provides a localhost:port TCP endpoint that tunnels to the remote daemon.
@@ -149,7 +149,7 @@ class TunnelService:
     # -- factory methods ----------------------------------------------------
 
     @classmethod
-    def from_env(cls, *, keep_remote_files: bool = False) -> "TunnelService":
+    def from_env(cls, *, keep_remote_files: bool = False) -> "SSHClient":
         """Create from VB_* environment variables."""
         from dotenv import load_dotenv
         load_dotenv()

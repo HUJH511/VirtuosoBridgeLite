@@ -8,9 +8,9 @@ These 3 files correspond to the two decoupled layers in the full package:
 |---|---|---|---|
 | `ramic_bridge.il` | 33 | Virtuoso side | `resources/ramic_bridge.il` |
 | `ramic_daemon.py` | 90 | TCP relay | `resources/ramic_bridge_daemon_*.py` |
-| `bridge_client.py` | 40 | Client side | `RAMICBridge` (pure TCP) |
+| `bridge_client.py` | 40 | Client side | `VirtuosoClient` (pure TCP) |
 
-The SSH tunnel (`TunnelService` in the full package) is not included here — you set it up manually.
+The SSH tunnel (`SSHClient` in the full package) is not included here — you set it up manually.
 
 ## How to Use
 
@@ -22,7 +22,7 @@ scp core/ramic_daemon.py remote:/tmp/
 #    load("/tmp/ramic_bridge.il")
 #    (it auto-starts the daemon on port 65432)
 
-# 3. SSH tunnel (this is what TunnelService does automatically)
+# 3. SSH tunnel (this is what SSHClient does automatically)
 ssh -N -L 65432:localhost:65432 remote &
 
 # 4. Run SKILL from your machine
@@ -38,11 +38,11 @@ Your Machine                          Remote Virtuoso Server
 ────────────                          ──────────────────────
 
 bridge_client.py                      Virtuoso process
-(= RAMICBridge)                       (= ramic_bridge.il)
+(= VirtuosoClient)                       (= ramic_bridge.il)
     │                                     │
     │ TCP: {"skill":"1+2"}                │
     ├──── SSH tunnel ────────────► ramic_daemon.py
-    │     (= TunnelService)               │
+    │     (= SSHClient)               │
     │                                     │ stdout: "1+2"
     │                                     ├──► evalstring("1+2")
     │                                     │        │
@@ -56,4 +56,4 @@ bridge_client.py                      Virtuoso process
    "3"
 ```
 
-`core/` is for understanding the mechanism. For production use, install the full package (`pip install -e .`) which adds TunnelService (auto SSH tunnel, reconnection, file transfer) and BridgeClient (JSON service protocol).
+`core/` is for understanding the mechanism. For production use, install the full package (`pip install -e .`) which adds SSHClient (auto SSH tunnel, reconnection, file transfer) and BridgeClient (JSON service protocol).

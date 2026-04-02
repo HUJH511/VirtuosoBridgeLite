@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from virtuoso_bridge.virtuoso.basic.bridge import RAMICBridge
+from virtuoso_bridge.virtuoso.basic.bridge import VirtuosoClient
 from virtuoso_bridge.models import VirtuosoResult
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def _update_health_from_result(
 
 def _dispatch(
     request: dict[str, Any],
-    bridge: RAMICBridge,
+    bridge: VirtuosoClient,
     state: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     """Route an incoming request to the appropriate bridge method."""
@@ -276,9 +276,9 @@ def _serve_forever(port: int, state_path: Path) -> None:
     }
     _write_state_file(state_path, service_state)
 
-    from virtuoso_bridge.transport.tunnel import TunnelService
-    tunnel = TunnelService.from_env(keep_remote_files=True)
-    bridge = RAMICBridge.from_tunnel(tunnel, log_to_ciw=True)
+    from virtuoso_bridge.transport.tunnel import SSHClient
+    tunnel = SSHClient.from_env(keep_remote_files=True)
+    bridge = VirtuosoClient.from_tunnel(tunnel, log_to_ciw=True)
     try:
         warm = bridge.warm_remote_session(timeout=15)
         service_state["warm_remote_session"] = _result_to_dict(warm)

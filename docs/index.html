@@ -106,13 +106,13 @@
   <!-- Architecture -->
   <div class="section">
     <h2>Architecture</h2>
-    <p class="arch-note">Two decoupled layers — RAMICBridge (TCP) and TunnelService (SSH) — work independently.</p>
-    <div class="arch-box">RAMICBridge ──TCP──► RAMIC daemon ──► evalstring() in Virtuoso
+    <p class="arch-note">Two decoupled layers — VirtuosoClient (TCP) and SSHClient (SSH) — work independently.</p>
+    <div class="arch-box">VirtuosoClient ──TCP──► RAMIC daemon ──► evalstring() in Virtuoso
     (pure client)       (on remote)
 
-TunnelService ──SSH──► port forward + file upload
+SSHClient ──SSH──► port forward + file upload
     (optional)          (creates the TCP path above)</div>
-    <p class="arch-note" style="margin-top:8px">Local mode: skip TunnelService entirely, connect RAMICBridge directly.</p>
+    <p class="arch-note" style="margin-top:8px">Local mode: skip SSHClient entirely, connect VirtuosoClient directly.</p>
   </div>
 
   <!-- Quick Start -->
@@ -183,19 +183,19 @@ result = sim.<span class="fn">run_simulation</span>(<span class="str">"tb_inv.sc
     </div>
 
     <div class="api-group">
-      <h3>TunnelService — independent SSH layer</h3>
-      <pre><code><span class="kw">from</span> virtuoso_bridge <span class="kw">import</span> TunnelService, RAMICBridge
+      <h3>SSHClient — independent SSH layer</h3>
+      <pre><code><span class="kw">from</span> virtuoso_bridge <span class="kw">import</span> SSHClient, VirtuosoClient
 
 <span class="cmt"># Create tunnel independently</span>
-tunnel = TunnelService.<span class="fn">from_env</span>()
+tunnel = SSHClient.<span class="fn">from_env</span>()
 tunnel.<span class="fn">warm</span>()
 
 <span class="cmt"># Create bridge from tunnel</span>
-bridge = RAMICBridge.<span class="fn">from_tunnel</span>(tunnel)
+bridge = VirtuosoClient.<span class="fn">from_tunnel</span>(tunnel)
 bridge.<span class="fn">execute_skill</span>(<span class="str">"1+2"</span>)
 
 <span class="cmt"># Or local mode — no tunnel needed</span>
-bridge = RAMICBridge.<span class="fn">local</span>(port=65432)</code></pre>
+bridge = VirtuosoClient.<span class="fn">local</span>(port=65432)</code></pre>
     </div>
   </div>
 

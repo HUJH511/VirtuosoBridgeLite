@@ -7,7 +7,7 @@ Control Cadence Virtuoso via Python — remotely over SSH or locally on the same
 | Mode | When | Setup |
 |---|---|---|
 | **Remote** | Virtuoso on a server, you work locally | Set `VB_REMOTE_HOST` in `.env`, run `virtuoso-bridge start` |
-| **Local** | Virtuoso on your own machine | Load `core/ramic_bridge.il` in CIW, use `RAMICBridge.local()` |
+| **Local** | Virtuoso on your own machine | Load `core/ramic_bridge.il` in CIW, use `VirtuosoClient.local()` |
 
 ## First-time setup check
 
@@ -39,8 +39,8 @@ When a user first opens this project, run these checks **before anything else**:
 
 3. **Connect** —
    ```python
-   from virtuoso_bridge import RAMICBridge
-   bridge = RAMICBridge.local(port=65432)
+   from virtuoso_bridge import VirtuosoClient
+   bridge = VirtuosoClient.local(port=65432)
    bridge.execute_skill("1+2")
    ```
 
@@ -48,18 +48,18 @@ When a user first opens this project, run these checks **before anything else**:
 
 Two decoupled layers:
 
-- **RAMICBridge** — pure TCP SKILL client. No SSH. Works with any `localhost:port` endpoint.
-- **TunnelService** — manages SSH tunnel + remote daemon deployment. Optional.
+- **VirtuosoClient** — pure TCP SKILL client. No SSH. Works with any `localhost:port` endpoint.
+- **SSHClient** — manages SSH tunnel + remote daemon deployment. Optional.
 
 ```python
-# Remote: TunnelService creates the TCP path
-from virtuoso_bridge import TunnelService, RAMICBridge
-tunnel = TunnelService.from_env()
+# Remote: SSHClient creates the TCP path
+from virtuoso_bridge import SSHClient, VirtuosoClient
+tunnel = SSHClient.from_env()
 tunnel.warm()
-bridge = RAMICBridge.from_tunnel(tunnel)
+bridge = VirtuosoClient.from_tunnel(tunnel)
 
 # Local: no tunnel needed
-bridge = RAMICBridge.local(port=65432)
+bridge = VirtuosoClient.local(port=65432)
 
 # Either way, same API:
 bridge.execute_skill("1+2")
@@ -67,7 +67,7 @@ bridge.execute_skill("1+2")
 
 ## Key conventions
 
-- All SKILL execution goes through `BridgeClient` or `RAMICBridge`. Never SSH and run SKILL manually.
+- All SKILL execution goes through `BridgeClient` or `VirtuosoClient`. Never SSH and run SKILL manually.
 - Layout/schematic editing: `client.layout.edit()` / `client.schematic.edit()` context managers.
 - Spectre simulation: `SpectreSimulator.from_env()`. Requires `VB_CADENCE_CSHRC` in `.env`.
 - `core/` is for understanding the mechanism (3 files, 180 lines). Use the installed package for real work.
