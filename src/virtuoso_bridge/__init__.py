@@ -3,6 +3,7 @@
 from virtuoso_bridge.virtuoso.basic.bridge import RAMICBridge
 from virtuoso_bridge.virtuoso.basic.client import BridgeClient
 from virtuoso_bridge.virtuoso.basic.service import BridgeService
+from virtuoso_bridge.transport.tunnel import TunnelService
 from virtuoso_bridge.virtuoso.basic.runtime_status import (
     collect_runtime_status,
     format_runtime_status,
@@ -20,6 +21,7 @@ __all__ = [
     "RAMICBridge",
     "BridgeClient",
     "BridgeService",
+    "TunnelService",
     "VirtuosoResult",
     "ExecutionStatus",
     "SkillResult",

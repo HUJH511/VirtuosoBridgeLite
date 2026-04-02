@@ -276,7 +276,9 @@ def _serve_forever(port: int, state_path: Path) -> None:
     }
     _write_state_file(state_path, service_state)
 
-    bridge = RAMICBridge.from_env(keep_remote_files=True)
+    from virtuoso_bridge.transport.tunnel import TunnelService
+    tunnel = TunnelService.from_env(keep_remote_files=True)
+    bridge = RAMICBridge.from_tunnel(tunnel, log_to_ciw=True)
     try:
         warm = bridge.warm_remote_session(timeout=15)
         service_state["warm_remote_session"] = _result_to_dict(warm)
@@ -383,8 +385,9 @@ class BridgeService:
             logger.info("Bridge service already running at %s:%d", _SERVICE_HOST, self.port)
             return self.read_state() or probe.get("service_state")
         if probe is not None:
-            # Port occupied by incompatible service — try next ports
+            # Port occupied — try next ports
             original_port = self.port
+            from virtuoso_bridge.transport.tunnel import _update_env_file
             for offset in range(1, 11):
                 candidate = original_port + offset
                 self.port = candidate
@@ -392,7 +395,6 @@ class BridgeService:
                 if retry_probe is None:
                     logger.info("Local port %d busy, auto-switched to %d", original_port, candidate)
                     print(f"[port] local port {original_port} busy, auto-switched to {candidate}", flush=True)
-                    from virtuoso_bridge.virtuoso.basic.bridge import _update_env_file
                     _update_env_file("VB_LOCAL_PORT", str(candidate))
                     break
                 if _is_compatible_status_response(retry_probe):
