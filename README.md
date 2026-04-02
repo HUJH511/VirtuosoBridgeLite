@@ -195,9 +195,25 @@ The `skills/` directory contains context documents for AI agents:
 | `virtuoso` | `skills/virtuoso/SKILL.md` | Bridge startup, SKILL execution, layout/schematic editing |
 | `spectre` | `skills/spectre/SKILL.md` | Netlist preparation, remote simulation, result parsing |
 
+### Installation for AI agents
+
+Copy the skill files into your project's agent skill directory so the agent can discover them automatically:
+
+```bash
+# Claude Code — copy into project-level skills
+cp -r skills/virtuoso .claude/skills/
+cp -r skills/spectre  .claude/skills/
+
+# Cursor — copy into project rules
+cp skills/virtuoso/SKILL.md .cursor/rules/virtuoso.md
+cp skills/spectre/SKILL.md  .cursor/rules/spectre.md
+
+# Other agents — place the skill files wherever your tool reads context from
+```
+
 ### How to use with Claude Code
 
-Type the slash command before your task:
+After installing skills, type the slash command before your task:
 
 ```
 /virtuoso open the layout for cell INV and add a metal1 rectangle
@@ -229,6 +245,24 @@ skills/virtuoso/
 
 skills/spectre/
   SKILL.md                              # Spectre simulation workflow
+```
+
+## Examples
+
+```
+examples/
+  01_hello_virtuoso.py         # connect and run SKILL commands
+  02_schematic_inverter.py     # create a CMOS inverter schematic from scratch
+  03_layout_ring_oscillator.py # place instances in a row with M1 wiring
+  04_spectre_veriloga.py       # Spectre DC sim with a Verilog-A resistor (no PDK needed)
+  05_read_cellview.py          # read back instances, shapes, layers from an open design
+```
+
+```bash
+# Try them in order:
+python examples/01_hello_virtuoso.py
+python examples/02_schematic_inverter.py
+python examples/04_spectre_veriloga.py
 ```
 
 ## Environment Variables
