@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>virtuoso-bridge-lite</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --blue: #58a6ff;
+      --purple: #bc8cff;
+      --orange: #f78166;
+      --green: #3fb950;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+    /* Hero */
+    .hero {
+      text-align: center;
+      padding: 80px 0 48px;
+    }
+    .hero h1 {
+      font-size: 2.8rem;
+      font-weight: 800;
+      letter-spacing: -1px;
+      margin-bottom: 16px;
+    }
+    .hero h1 .lite { color: var(--purple); font-weight: 400; }
+    .hero p {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 600px;
+      margin: 0 auto 32px;
+    }
+    .hero-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+
+    /* Bridge visual */
+    .bridge-visual {
+      text-align: center;
+      padding: 32px 0 48px;
+      position: relative;
+    }
+    .bridge-svg { max-width: 600px; width: 100%; }
+
+    /* Features */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      padding: 32px 0;
+    }
+    @media (max-width: 640px) {
+      .features { grid-template-columns: 1fr; }
+    }
+    .feature {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature h3 {
+      font-size: 1rem;
+      margin-bottom: 8px;
+    }
+    .feature h3 .icon { margin-right: 6px; }
+    .feature p {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    /* Quick Start */
+    .section { padding: 48px 0; }
+    .section h2 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 24px;
+      text-align: center;
+    }
+    pre {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      line-height: 1.7;
+      margin-bottom: 16px;
+    }
+    code { font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace; }
+    .kw { color: var(--purple); }
+    .str { color: var(--green); }
+    .fn { color: var(--blue); }
+    .cmt { color: var(--muted); }
+    .cmd { color: var(--orange); }
+
+    /* Architecture */
+    .arch-diagram {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      text-align: center;
+      font-family: monospace;
+      font-size: 0.85rem;
+      white-space: pre;
+      overflow-x: auto;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      padding: 48px 0 32px;
+      color: var(--muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+    }
+    .footer a { color: var(--blue); text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>virtuoso-bridge<span class="lite">-lite</span></h1>
+    <p>Control remote Cadence Virtuoso from any machine over SSH. No VNC, no X11. Python + SSH + AI agents.</p>
+    <div class="hero-buttons">
+      <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite" class="btn btn-primary">GitHub</a>
+      <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite#quick-start" class="btn btn-secondary">Quick Start</a>
+    </div>
+  </div>
+
+  <!-- Bridge visual -->
+  <div class="bridge-visual">
+    <svg class="bridge-svg" viewBox="0 0 600 120" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="g1" x1="0%" x2="100%">
+          <stop offset="0%" stop-color="#58a6ff"/>
+          <stop offset="50%" stop-color="#bc8cff"/>
+          <stop offset="100%" stop-color="#f78166"/>
+        </linearGradient>
+      </defs>
+      <!-- Bridge arch -->
+      <path d="M80 90 Q300 10 520 90" stroke="url(#g1)" stroke-width="2.5" fill="none"/>
+      <line x1="80" y1="90" x2="520" y2="90" stroke="url(#g1)" stroke-width="1" opacity="0.3"/>
+      <line x1="190" y1="62" x2="190" y2="90" stroke="#58a6ff" stroke-width="1" opacity="0.4"/>
+      <line x1="300" y1="38" x2="300" y2="90" stroke="#bc8cff" stroke-width="1" opacity="0.4"/>
+      <line x1="410" y1="62" x2="410" y2="90" stroke="#f78166" stroke-width="1" opacity="0.4"/>
+      <!-- Labels -->
+      <text x="30" y="95" fill="#58a6ff" font-family="monospace" font-size="13" font-weight="600">Python</text>
+      <text x="480" y="95" fill="#f78166" font-family="monospace" font-size="13" font-weight="600">Virtuoso</text>
+      <text x="284" y="30" fill="#bc8cff" font-family="monospace" font-size="11" opacity="0.7">SSH</text>
+      <!-- Animated dots -->
+      <circle r="3" fill="#58a6ff">
+        <animate attributeName="cx" values="80;520" dur="2.5s" repeatCount="indefinite"/>
+        <animate attributeName="cy" values="90;38;90" dur="2.5s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;0" dur="2.5s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="3" fill="#f78166">
+        <animate attributeName="cx" values="520;80" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="cy" values="90;38;90" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;0" dur="3s" repeatCount="indefinite"/>
+      </circle>
+    </svg>
+  </div>
+
+  <!-- Features -->
+  <div class="features">
+    <div class="feature">
+      <h3><span class="icon">&#9889;</span>SKILL Execution</h3>
+      <p>Send any SKILL command to a running Virtuoso and get results back as Python dicts.</p>
+    </div>
+    <div class="feature">
+      <h3><span class="icon">&#9638;</span>Layout &amp; Schematic</h3>
+      <p>Python API for creating, modifying, and reading cellviews. Context managers handle open/save.</p>
+    </div>
+    <div class="feature">
+      <h3><span class="icon">&#9881;</span>Spectre Simulation</h3>
+      <p>Upload netlists, run simulations remotely, parse PSF results — all from Python.</p>
+    </div>
+  </div>
+
+  <!-- Quick Start -->
+  <div class="section">
+    <h2>Quick Start</h2>
+    <pre><code><span class="cmd">pip install -e .</span>
+<span class="cmd">virtuoso-bridge init</span>        <span class="cmt"># generates .env</span>
+<span class="cmt"># edit .env → set VB_REMOTE_HOST=my-server</span>
+<span class="cmd">virtuoso-bridge start</span></code></pre>
+
+    <pre><code><span class="kw">from</span> virtuoso_bridge <span class="kw">import</span> BridgeClient
+
+client = BridgeClient()
+result = client.<span class="fn">execute_skill</span>(<span class="str">"1+2"</span>)
+<span class="fn">print</span>(result)  <span class="cmt"># {'ok': True, 'result': {'output': '3', ...}}</span></code></pre>
+  </div>
+
+  <!-- Architecture -->
+  <div class="section">
+    <h2>Architecture</h2>
+    <div class="arch-diagram">Local Machine                     Remote Virtuoso Server
+──────────────                     ──────────────────────
+Python script                      Virtuoso (running)
+    │                                  │
+    ▼                                  ▼
+BridgeClient ──TCP──► BridgeService   RAMIC daemon
+                          │               │
+                          └───SSH tunnel──┘
+                                  │
+                              SKILL execution</div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <p>
+      <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite">GitHub</a> ·
+      MIT License ·
+      Tsinghua University
+    </p>
+  </div>
+
+</div>
+</body>
+</html>

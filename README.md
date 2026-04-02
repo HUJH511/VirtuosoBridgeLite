@@ -9,33 +9,11 @@
   <a href="https://claude.ai/code"><img src="https://img.shields.io/badge/AI%20Native-agent--driven%20development-blueviolet" alt="AI Native"/></a>
 </p> 
 
+Control a remote Cadence Virtuoso from any machine over SSH. No VNC, no X11, no manual terminal sessions.
 
 Use a coding agent (Claude Code, Cursor, etc.) to read this repo and tailor it to your project — PDK, libraries, tech node, directory structure. You describe intent; the agent writes SKILL, builds layouts, runs simulations.
 
-Control a remote Cadence Virtuoso from any machine over SSH. No VNC, no X11, no manual terminal sessions.
-
-### Why use this?
-
-- **Remote-first** — SSH tunnel handles all communication. Your code runs locally (tested from mac, windows, linux); SKILL executes on the server.
-- **Persistent SSH** — one long-lived connection with automatic reconnection. No repeated `ssh` logins, no dropped sessions, fast operations for agent tool calling.
-- **Jump host support** — works through bastion hosts out of the box (`VB_JUMP_HOST`).
-- **AI Native** — designed for AI agents to drive. Describe what you want; the agent generates SKILL, builds layouts, runs simulations.
-
-### Three capabilities:
-
-1. **SKILL execution** — send SKILL commands to a running Virtuoso, get results back
-2. **Layout & Schematic editing** — Python API for creating/modifying cellviews
-3. **Spectre simulation** — run simulations remotely, parse results automatically
-
-> Distilled from a fully verified end-to-end environment harness covering SKILL execution, Spectre simulation, OCEAN analysis, and Calibre DRC/LVS/PEX, tested in production TSMC 28nm tape-out workflows. This lite version extracts the core and removes all site-specific paths and credentials. Compared to the full version:
->
-> - **Removed** Calibre DRC/LVS/PEX wrappers and all associated CSH scripts
-> - **Removed** OCEAN script integration
-> - **Removed** example netlists, simulation outputs, and Calibre rule decks
-> - **Removed** all hardcoded PDK paths, internal usernames, and site-specific server paths from source and git history
-> - **Trimmed** docstrings and redundant code (~21% smaller)
->
-> What remains is the core: SSH transport, SKILL execution, layout/schematic editing, and Spectre simulation.
+> **If you are an AI agent**, read [`AGENTS.md`](AGENTS.md) first and follow its setup checklist.
 
 ## Quick Start
 
@@ -71,225 +49,9 @@ Done.
 1. **SSH**: `ssh my-server` must work in your terminal without a password prompt. Fix SSH first if it doesn't.
 2. **Virtuoso**: a Virtuoso process must be running on the remote machine.
 
-## What You Can Do
-
-### 1. Execute any SKILL command
-
-```python
-client = BridgeClient()
-
-# Query Virtuoso state
-client.execute_skill("hiGetCurrentWindow()")
-client.execute_skill("geGetEditCellView()")
-
-# Run SKILL expressions
-client.execute_skill('println("hello from Python")')
-
-# Load a SKILL file into Virtuoso
-client.load_il("path/to/script.il")
-```
-
-### 2. Edit layout
-
-```python
-with client.layout.edit("myLib", "myCell", mode="a") as layout:
-    # Draw shapes
-    layout.add_rect("M1", "drawing", (0.0, 0.0, 1.0, 0.5))
-    layout.add_path("M2", "drawing", [(0, 0), (1, 0), (1, 1)], width=0.1)
-    layout.add_label("M1", "drawing", (0.5, 0.25), "VDD")
-
-    # Place instances
-    layout.add_instance("tsmcN28", "nch_ulvt_mac", (0, 0), "I0",
-                        params={"w": "200n", "l": "30n", "nf": 4})
-
-    # Place vias
-    layout.add_via("M1_M2", (0.5, 0.25))
-
-    # Read back geometry
-    shapes = layout.get_shapes()
-```
-
-### 3. Edit schematic
-
-```python
-with client.schematic.edit("myLib", "myCell") as sch:
-    sch.add_instance("analogLib", "vdc", (0, 0), "V0",
-                     params={"vdc": "0.9"})
-    sch.add_instance("analogLib", "gnd", (0, -0.5), "GND0")
-    sch.add_wire([(0, 0), (0, 0.5)])
-    sch.add_pin("VDD", "inputOutput", (0, 1.0))
-```
-
-### 4. Run Spectre simulation
-
-```python
-from virtuoso_bridge.spectre.runner import SpectreSimulator
-
-sim = SpectreSimulator.from_env(work_dir="./output")
-result = sim.run_simulation("tb_inv.scs", {})
-
-print(result.status)            # ExecutionStatus.SUCCESS
-print(result.data.keys())       # ['time', 'VOUT', 'VIN', ...]
-print(result.data["VOUT"][:5])  # first 5 voltage samples
-```
-
-Set `VB_CADENCE_CSHRC` in `.env` if `spectre` is not in the default PATH on the remote machine.
-
-### 5. File transfer & shell commands
-
-```python
-# Upload a file to the remote machine
-client.upload_file("local/netlist.scs", "/tmp/remote/netlist.scs")
-
-# Download a file
-client.download_file("/tmp/remote/results.txt", "local/results.txt")
-
-# Run a shell command on the remote machine
-client.run_shell_command("ls /tmp/remote/")
-```
-
-## How to Configure PDK Paths
-
-You do **not** need to manually look up PDK paths. Instead:
-
-1. Open any testbench in Virtuoso
-2. Export the netlist: **Simulation > Netlist > Create**
-3. The `.scs` file contains all the info an AI needs:
-
-```spectre
-include "/path/to/pdk/models/spectre/toplevel.scs" section=TOP_TT
-
-M0 (VOUT VIN VSS VSS) nch_ulvt_mac l=30n w=1u nf=1
-```
-
-From this, an AI assistant knows: PDK model paths, device names (`nch_ulvt_mac`), library names, default parameters, and Spectre syntax. No manual configuration needed.
-
-## AI Agent Skills
-
-The `skills/` directory contains context documents for AI agents:
-
-| Skill | File | Covers |
-|---|---|---|
-| `virtuoso` | `skills/virtuoso/SKILL.md` | Bridge startup, SKILL execution, layout/schematic editing |
-| `spectre` | `skills/spectre/SKILL.md` | Netlist preparation, remote simulation, result parsing |
-
-### Installation for AI agents
-
-Copy the skill files into your project's agent skill directory so the agent can discover them automatically:
-
-```bash
-# Claude Code — copy into project-level skills
-cp -r skills/virtuoso .claude/skills/
-cp -r skills/spectre  .claude/skills/
-
-# Cursor — copy into project rules
-cp skills/virtuoso/SKILL.md .cursor/rules/virtuoso.md
-cp skills/spectre/SKILL.md  .cursor/rules/spectre.md
-
-# Other agents — place the skill files wherever your tool reads context from
-```
-
-### How to use with Claude Code
-
-After installing skills, type the slash command before your task:
-
-```
-/virtuoso open the layout for cell INV and add a metal1 rectangle
-/spectre run a transient simulation on the inverter netlist
-```
-
-### How to use with other AI tools
-
-Point the tool at the skill file:
-
-```
-Read skills/virtuoso/SKILL.md, then help me create a layout for a 4x8 NMOS array.
-```
-
-The skill file tells the AI which APIs to use, what the workflow looks like, and what pitfalls to avoid. Reference documents under `skills/virtuoso/references/` provide SKILL examples, metal rules, and layout conventions.
-
-### Skill reference files
-
-```
-skills/virtuoso/
-  SKILL.md                              # main skill document
-  references/
-    layout.md                           # layout editing patterns and SKILL examples
-    schematic.md                        # schematic editing patterns
-    t28_metal_rules.md                  # metal width/spacing rules (T28 example)
-    bindkey_operation_index.md          # Virtuoso bindkey reference
-  assets/
-    cfmom_unary_cdac_reference.py       # real-world layout example
-
-skills/spectre/
-  SKILL.md                              # Spectre simulation workflow
-```
-
-## Examples
-
-All examples use only `analogLib` and generic layers — **no PDK required**.
-
-```
-examples/
-  01_virtuoso/
-    basic/
-      01_execute_skill.py              # run SKILL expressions
-      02_load_il.py                    # load a .il file into Virtuoso
-      03_list_library_cells.py         # enumerate libraries and cells
-    schematic/
-      01_execute_operations.py         # batch operations
-      02_read_connectivity.py          # read nets, pins, instances
-      03_create_rc.py                  # create RC circuit (analogLib)
-      05_create_cellview.py            # create empty cellview
-      06_read_instance_params.py       # read instance parameters
-      07_export_netlist_cdl.py         # export CDL netlist
-      08_rename_instance.py            # rename an instance
-      09_delete_instance.py            # delete an instance
-      10_delete_cell.py                # delete a cell
-      11_screenshot.py                 # capture schematic screenshot
-    layout/
-      02_add_polygon.py                # add polygon shapes
-      03_add_via.py                    # place vias
-      04_multilayer_routing.py         # M1/M2/M3 routing
-      05_bus_routing.py                # bus wiring patterns
-      06_read_layout.py                # read back layout geometry
-      07_screenshot.py                 # capture layout screenshot
-      08_delete_shapes_on_layer.py     # delete shapes by layer
-      09_clear_routing.py              # clear routing metals
-      10_clear_current_layout.py       # clear entire layout
-      11_delete_cell.py                # delete a cell
-      flower.py                        # fun: draw a flower in layout
-  02_spectre/
-    02_veriloga_adc_dac.py             # 4-bit ADC/DAC with pure Verilog-A
-```
-
-```bash
-# Quick start:
-python examples/01_virtuoso/basic/01_execute_skill.py
-python examples/01_virtuoso/schematic/03_create_rc.py
-python examples/01_virtuoso/layout/04_multilayer_routing.py
-python examples/02_spectre/02_veriloga_adc_dac.py
-```
-
-## Environment Variables
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `VB_REMOTE_HOST` | Yes | SSH host running Virtuoso |
-| `VB_REMOTE_USER` | No | SSH user (defaults to local username) |
-| `VB_JUMP_HOST` | No | Bastion / jump host |
-| `VB_CADENCE_CSHRC` | For Spectre | cshrc that sources Cadence tools on the remote machine |
-
-## CLI
-
-```bash
-virtuoso-bridge init      # create .env template
-virtuoso-bridge start     # start the bridge service
-virtuoso-bridge restart   # force-restart
-virtuoso-bridge status    # check connection health
-```
-
 ## Architecture
+
+> Want to understand the raw mechanism? See [`core/`](core/) — the entire bridge distilled into 3 files (180 lines), with no dependencies, no CLI, no auto-reconnect. Read it first, then use the full package.
 
 ```
 Local Machine (any OS)            Remote Virtuoso Server
@@ -304,10 +66,20 @@ BridgeClient ──TCP──► BridgeService  RAMIC daemon (Python 2.7)
                               SKILL execution
 ```
 
-- `BridgeService` runs as a background process, manages the SSH tunnel
-- `RAMIC daemon` is a tiny Python 2.7 TCP server uploaded to the Virtuoso host
-- SKILL commands are sent as JSON over the tunnel, executed in Virtuoso, results returned
-- `SpectreSimulator` uses SSH to upload netlists and run simulations independently
+Three capabilities:
+
+1. **SKILL execution** — send SKILL commands to a running Virtuoso, get results back
+2. **Layout & Schematic editing** — Python API for creating/modifying cellviews
+3. **Spectre simulation** — run simulations remotely, parse results automatically
+
+## CLI
+
+```bash
+virtuoso-bridge init      # create .env template
+virtuoso-bridge start     # start the bridge service
+virtuoso-bridge restart   # force-restart
+virtuoso-bridge status    # check connection health + Spectre license
+```
 
 ## Build & Test
 
