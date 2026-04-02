@@ -64,7 +64,11 @@ result = client.execute_skill("1+2")
 print(result)  # {'ok': True, 'result': {'output': '3', ...}}
 ```
 
-Done. SSH keys must already work (`ssh my-server` without password prompt).
+Done.
+
+### SSH not working?
+
+**Rule: if `ssh my-server` works in your terminal, the bridge will work.** Fix SSH first, then run `virtuoso-bridge start`.
 
 ### SSH Prerequisites
 
