@@ -5,6 +5,8 @@
 \usepackage{graphicx}
 \usepackage{url}
 \usepackage{cite}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit}
 
 \begin{document}
 
@@ -66,13 +68,12 @@ The communication protocol between VirtuosoClient and the daemon is deliberately
 
 The \texttt{core/} directory of the repository contains the entire bridge mechanism in 3 files totaling 180 lines, with no external dependencies. This minimal implementation serves as both documentation and a design principle. Users and agents can read and understand the full mechanism, then extend it from first principles rather than treating the system as an opaque dependency.
 
-\begin{figure}[!t]
+\begin{figure*}[!t]
 \centering
-% TODO: replace with hand-drawn architecture diagram
-\framebox[\columnwidth]{\parbox{0.9\columnwidth}{\centering\vspace{2.5cm}\textit{Architecture diagram placeholder}\\[6pt]\small Remote Mode: VirtuosoClient $\to$ TCP $\to$ SSH tunnel $\to$ RAMIC daemon $\to$ Virtuoso\\Local Mode: VirtuosoClient $\to$ TCP $\to$ RAMIC daemon $\to$ Virtuoso\vspace{2.5cm}}}
-\caption{Decoupled architecture. VirtuosoClient connects to a TCP endpoint without knowing whether it is local or tunneled. SSHClient (optional) creates the tunnel and deploys the daemon.}
+\resizebox{0.85\textwidth}{!}{\input{figures/architecture.tex}}
+\caption{Decoupled architecture showing both remote and local modes. In remote mode, SSHClient creates an SSH tunnel and deploys the daemon. VirtuosoClient connects to a TCP endpoint without knowing whether it is local or tunneled. In local mode, SSHClient is not used.}
 \label{fig:architecture}
-\end{figure}
+\end{figure*}
 
 %═══════════════════════════════════════════════════════════════════════
 \section{Three Levels of Programmability}
