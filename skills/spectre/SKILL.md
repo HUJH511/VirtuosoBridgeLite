@@ -7,7 +7,9 @@ description: "Run Cadence Spectre simulations remotely via virtuoso-bridge: uplo
 
 ## How it works
 
-`SpectreSimulator` uploads a `.scs` netlist to a remote machine via SSH, runs Spectre there, downloads the PSF results, and parses them into Python dicts. You write the netlist locally, the simulation runs remotely — no Virtuoso GUI needed.
+`SpectreSimulator` uploads a `.scs` netlist to a remote machine via SSH, runs Spectre there, downloads the PSF results, and parses them into Python dicts. You write the netlist locally, the simulation runs remotely — no Virtuoso GUI needed. SSH is managed automatically by `SpectreSimulator.from_env()` — just configure `.env` with the remote host and Cadence environment path.
+
+`SpectreSimulator` is independent of `VirtuosoClient` (see the **virtuoso** skill). You can run standalone Spectre simulations without a Virtuoso GUI session.
 
 The typical workflow:
 1. Write or prepare a `.scs` netlist (see `references/netlist_syntax.md` for syntax)

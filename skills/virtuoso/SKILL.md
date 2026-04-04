@@ -7,7 +7,9 @@ description: "Bridge to remote Cadence Virtuoso: SKILL execution, layout/schemat
 
 ## How it works
 
-You control a remote Cadence Virtuoso instance through `virtuoso-bridge` — a Python client that sends SKILL commands to the running Virtuoso CIW over a persistent connection. You write Python locally; Virtuoso executes SKILL remotely.
+You control a remote Cadence Virtuoso instance through `virtuoso-bridge` — a Python client that sends SKILL commands to the running Virtuoso CIW over a persistent connection. You write Python locally; Virtuoso executes SKILL remotely. SSH tunneling and daemon management are handled automatically by `VirtuosoClient.from_env()` — just configure `.env` with the remote host info and it works.
+
+`VirtuosoClient` and `SpectreSimulator` (see the **spectre** skill) are independent clients. You don't need one to use the other.
 
 The bridge supports three levels of abstraction (highest to lowest):
 
@@ -73,14 +75,17 @@ client.execute_skill('myCustomFunction("arg1" "arg2")')
 
 Put loops in `.il` files rather than sending giant SKILL strings — keeps each request payload small while the heavy loop runs inside Virtuoso.
 
-### Other operations
+### File transfer and other operations
+
+`VirtuosoClient` is the only client that exposes file transfer to the user. `SpectreSimulator` handles its own file transfer internally during `run_simulation()`.
 
 ```python
+client.upload_file(local_path, remote_path)    # local → remote
+client.download_file(remote_path, local_path)  # remote → local
 client.open_window(lib, cell, view="layout")
 client.get_current_design()
 client.save_current_cellview()
 client.close_current_cellview()
-client.download_file(remote_path, local_path)
 client.run_shell_command("ls /tmp/")
 ```
 
