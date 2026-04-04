@@ -10,6 +10,8 @@ import os
 import queue
 import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import threading
 import time
@@ -143,6 +145,11 @@ class SSHRunner:
         self._shell_reader: threading.Thread | None = None
         self._shell_lock = threading.RLock()
 
+        # Port-forwarding tunnel state
+        self._tunnel_proc: subprocess.Popen[bytes] | None = None
+        self._tunnel_pid: int | None = None
+        self._tunnel_using_external = False
+
     @property
     def host(self) -> str:
         """Target hostname."""
@@ -157,6 +164,158 @@ class SSHRunner:
     def persistent_shell_enabled(self) -> bool:
         """Whether run_command / upload_text reuse one SSH shell."""
         return self._persistent_shell_enabled
+
+    # -- port-forwarding tunnel ----------------------------------------------
+
+    def start_port_forward(self, port: int, settle: float = 1.5) -> subprocess.Popen[bytes] | None:
+        """Start a persistent SSH port-forwarding tunnel.
+
+        Returns the Popen process on success, or None if reusing an existing
+        tunnel (port already reachable).  Raises RuntimeError on failure.
+        """
+        cmd: list[str] = [self._ssh_cmd]
+        cmd += self._common_ssh_options()
+        cmd += [
+            "-o", "ExitOnForwardFailure=yes",
+            "-N",
+            "-L", f"{port}:127.0.0.1:{port}",
+        ]
+        if self._user:
+            cmd.append(f"{self._user}@{self._host}")
+        else:
+            cmd.append(self._host)
+
+        logger.info("Starting SSH tunnel: %s", " ".join(cmd))
+        if self._verbose:
+            print(f"[cmd] {' '.join(cmd)}", flush=True)
+
+        if os.name == "nt":
+            pid = self._start_hidden_windows_process(cmd)
+            jh_settle = max(settle, 3.0) if self._jump_host else settle
+            deadline = time.monotonic() + jh_settle
+            while time.monotonic() < deadline:
+                if self.can_reach_port(port):
+                    self._tunnel_pid = pid
+                    self._tunnel_using_external = True
+                    return None
+                time.sleep(0.1)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            raise RuntimeError("SSH tunnel failed to start on Windows")
+
+        popen_kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "start_new_session": True,
+            "stderr": subprocess.PIPE,
+        }
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+
+        jh_settle = max(settle, 3.0) if self._jump_host else settle
+        deadline = time.monotonic() + jh_settle
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        if proc.poll() is not None:
+            err_msg = ""
+            if proc.stderr and proc.stderr.readable():
+                try:
+                    err_msg = proc.stderr.read().decode("utf-8", errors="ignore")
+                except (OSError, ValueError):
+                    pass
+            if "address already in use" in err_msg.lower() and self.can_reach_port(port):
+                logger.info("Reusing existing tunnel at localhost:%d", port)
+                self._tunnel_using_external = True
+                return None
+            return proc  # failed — caller inspects poll/stderr
+        self._tunnel_proc = proc
+        self._tunnel_pid = proc.pid
+        return proc  # running
+
+    def stop_port_forward(self) -> None:
+        """Stop the port-forwarding tunnel."""
+        pid = None
+        if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
+            pid = self._tunnel_proc.pid
+        elif self._tunnel_pid:
+            pid = self._tunnel_pid
+        if pid:
+            logger.info("Terminating SSH tunnel (PID %d)", pid)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, PermissionError):
+                pass
+        self._tunnel_proc = None
+        self._tunnel_pid = None
+        self._tunnel_using_external = False
+
+    @property
+    def is_tunnel_alive(self) -> bool:
+        if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
+            return True
+        if self._tunnel_using_external and self._tunnel_pid:
+            try:
+                os.kill(self._tunnel_pid, 0)
+                return True
+            except (OSError, PermissionError):
+                pass
+        return False
+
+    @property
+    def tunnel_pid(self) -> int | None:
+        if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
+            return self._tunnel_proc.pid
+        return self._tunnel_pid
+
+    @tunnel_pid.setter
+    def tunnel_pid(self, value: int | None) -> None:
+        self._tunnel_pid = value
+        if value is not None:
+            self._tunnel_using_external = True
+
+    @staticmethod
+    def can_reach_port(port: int) -> bool:
+        """Check if localhost:port accepts TCP connections."""
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2)
+            s.close()
+            return True
+        except (ConnectionRefusedError, OSError):
+            return False
+
+    @staticmethod
+    def _start_hidden_windows_process(cmd: list[str]) -> int:
+        """Start a process with hidden console on Windows."""
+        def _ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        file_path = _ps_quote(cmd[0])
+        args = ", ".join(_ps_quote(part) for part in cmd[1:])
+        script = (
+            f"$p = Start-Process -FilePath {file_path} "
+            f"-ArgumentList @({args}) -WindowStyle Hidden -PassThru; "
+            "$p.Id"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to launch hidden SSH tunnel: {result.stderr.strip()}")
+        try:
+            return int(result.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError(
+                f"Failed to parse hidden SSH tunnel PID: {result.stdout.strip()!r}"
+            ) from exc
+
+    # -- connection test -------------------------------------------------------
 
     def test_connection(self, timeout: int | None = None) -> bool:
         """Test SSH connectivity to the remote host."""

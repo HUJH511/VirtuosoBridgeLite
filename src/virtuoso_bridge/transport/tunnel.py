@@ -12,9 +12,7 @@ import json
 import logging
 import os
 import re
-import signal
 import socket
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -144,9 +142,6 @@ class SSHClient:
             verbose=True,
         )
 
-        self._tunnel_proc: subprocess.Popen[bytes] | None = None
-        self._saved_tunnel_pid: int | None = None
-        self._using_external_tunnel = False
         self._remote_setup_done = False
         self._remote_work_dir: str | None = None
         self._remote_virtuoso_setup_path: str | None = None
@@ -207,7 +202,7 @@ class SSHClient:
 
     @property
     def is_tunnel_alive(self) -> bool:
-        return self._tunnel_proc is not None and self._tunnel_proc.poll() is None
+        return self._ssh_runner.is_tunnel_alive
 
     # -- remote deployment --------------------------------------------------
 
@@ -293,140 +288,28 @@ class SSHClient:
         self._remote_virtuoso_setup_path = remote_setup
         logger.info("Remote setup complete; setup script at %s (using %s)", remote_setup, python_cmd)
 
-    # -- SSH tunnel ---------------------------------------------------------
-
-    def _try_ssh_tunnel(self, port: int) -> subprocess.Popen[bytes] | None:
-        cmd: list[str] = ["ssh"]
-        cmd += [
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ExitOnForwardFailure=yes",
-            "-N",
-            "-L", f"{port}:127.0.0.1:{port}",
-        ]
-        if self._jump_host:
-            jump_user = self._jump_user or self._remote_user
-            jump_target = f"{jump_user}@{self._jump_host}" if jump_user else self._jump_host
-            cmd += ["-J", jump_target]
-        if self._remote_user:
-            cmd.append(f"{self._remote_user}@{self._remote_host}")
-        else:
-            cmd.append(self._remote_host)
-
-        logger.info("Starting SSH tunnel: %s", " ".join(cmd))
-        print(f"[cmd] {' '.join(cmd)}", flush=True)
-
-        # Platform-specific detach: tunnel must survive parent process exit
-        if os.name == "nt":
-            # On Windows, launching ssh.exe directly can still show a console
-            # window, especially when ProxyJump causes ssh to spawn another ssh.
-            # Start it from a hidden PowerShell process instead.
-            pid = self._start_hidden_windows_process(cmd)
-
-            settle = _TUNNEL_STARTUP_SETTLE_SECONDS
-            if self._jump_host:
-                settle = max(settle, 3.0)
-            deadline = time.monotonic() + settle
-            while time.monotonic() < deadline:
-                if self._can_reach_port(port):
-                    self._saved_tunnel_pid = pid
-                    self._using_external_tunnel = True
-                    return None
-                time.sleep(0.1)
-
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-            raise RuntimeError("SSH tunnel failed to start on Windows")
-        else:
-            popen_kwargs: dict[str, Any] = {
-                "stdin": subprocess.DEVNULL,
-                "stdout": subprocess.DEVNULL,
-                "start_new_session": True,
-                "stderr": subprocess.PIPE,
-            }
-            proc = subprocess.Popen(cmd, **popen_kwargs)
-
-            # Wait for tunnel to settle (longer for jump-host paths)
-            settle = _TUNNEL_STARTUP_SETTLE_SECONDS
-            if self._jump_host:
-                settle = max(settle, 3.0)
-            deadline = time.monotonic() + settle
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-
-            if proc.poll() is not None:
-                err_msg = ""
-                if proc.stderr and proc.stderr.readable():
-                    try:
-                        err_msg = proc.stderr.read().decode("utf-8", errors="ignore")
-                    except (OSError, ValueError):
-                        pass
-                if "address already in use" in err_msg.lower() and self._can_reach_port(port):
-                    logger.info("Reusing existing tunnel at localhost:%d", port)
-                    self._using_external_tunnel = True
-                    return None
-                return proc  # failed
-            return proc  # running
-
-    def _start_hidden_windows_process(self, cmd: list[str]) -> int:
-        def _ps_quote(value: str) -> str:
-            return "'" + value.replace("'", "''") + "'"
-
-        file_path = _ps_quote(cmd[0])
-        args = ", ".join(_ps_quote(part) for part in cmd[1:])
-        script = (
-            f"$p = Start-Process -FilePath {file_path} "
-            f"-ArgumentList @({args}) -WindowStyle Hidden -PassThru; "
-            "$p.Id"
-        )
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to launch hidden SSH tunnel: {result.stderr.strip()}")
-        try:
-            return int(result.stdout.strip().splitlines()[-1])
-        except (IndexError, ValueError) as exc:
-            raise RuntimeError(
-                f"Failed to parse hidden SSH tunnel PID: {result.stdout.strip()!r}"
-            ) from exc
-
-    def _can_reach_port(self, port: int) -> bool:
-        """Check if localhost:port accepts TCP connections."""
-        try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=2)
-            s.close()
-            return True
-        except (ConnectionRefusedError, OSError):
-            return False
+    # -- SSH tunnel (delegated to SSHRunner) ----------------------------------
 
     def ensure_tunnel(self) -> None:
         """Ensure SSH tunnel is running, auto-retry on port conflict."""
-        if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
+        if self._ssh_runner.is_tunnel_alive:
             return
-        if self._using_external_tunnel and self._can_reach_port(self._port):
+        if SSHRunner.can_reach_port(self._port):
             return
-        self._using_external_tunnel = False
 
         max_attempts = 10
         port = self._port
         for attempt in range(max_attempts):
-            proc = self._try_ssh_tunnel(port)
+            settle = _TUNNEL_STARTUP_SETTLE_SECONDS
+            if self._jump_host:
+                settle = max(settle, 3.0)
+            proc = self._ssh_runner.start_port_forward(port, settle=settle)
             if proc is None:
                 # Reusing existing tunnel
                 self._port = port
                 return
             if proc.poll() is None:
                 # Tunnel running
-                self._tunnel_proc = proc
-                self._saved_tunnel_pid = proc.pid
                 if port != self._port:
                     logger.info("Port %d was busy, using port %d", self._port, port)
                     print(f"[port] {self._port} busy, auto-switched to {port}", flush=True)
@@ -460,22 +343,15 @@ class SSHClient:
 
     def stop(self) -> None:
         """Kill the tunnel and clean up."""
-        # Kill tunnel by PID (may be from state file or from this session)
-        tunnel_pid = None
-        if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
-            tunnel_pid = self._tunnel_proc.pid
-        elif not tunnel_pid:
+        # Try state file PID first (may be from a previous session)
+        if not self._ssh_runner.is_tunnel_alive:
             state = self.read_state()
             if state:
-                tunnel_pid = state.get("tunnel_pid")
+                pid = state.get("tunnel_pid")
+                if pid:
+                    self._ssh_runner.tunnel_pid = pid
 
-        if tunnel_pid:
-            logger.info("Terminating SSH tunnel (PID %d)", tunnel_pid)
-            try:
-                os.kill(tunnel_pid, signal.SIGTERM)
-            except OSError:
-                pass
-        self._tunnel_proc = None
+        self._ssh_runner.stop_port_forward()
 
         if not self._keep_remote_files and self._remote_setup_done and self._remote_work_dir:
             try:
@@ -504,7 +380,7 @@ class SSHClient:
     def save_state(self) -> None:
         """Save tunnel state so other processes can find the port."""
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tunnel_pid = self._tunnel_proc.pid if self._tunnel_proc and self._tunnel_proc.poll() is None else self._saved_tunnel_pid
+        tunnel_pid = self._ssh_runner.tunnel_pid
         state = {
             "port": self._port,
             "tunnel_pid": tunnel_pid,
