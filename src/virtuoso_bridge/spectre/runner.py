@@ -485,15 +485,35 @@ def _build_simulation_result(
     errors: list[str] = []
     warnings: list[str] = []
     combined = (run_result.stdout or "") + "\n" + (run_result.stderr or "")
+    combined_lower = combined.lower()
+
+    # Classify errors into short, actionable messages
+    if "circuit read-in" in combined_lower:
+        errors.append("netlist read error (missing include or syntax)")
+    elif "license" in combined_lower and ("error" in combined_lower or "denied" in combined_lower):
+        errors.append("license error")
+    elif "convergence" in combined_lower:
+        errors.append("convergence failure")
+    elif "no such file" in combined_lower or "cannot open" in combined_lower:
+        errors.append("file not found")
+    elif "segmentation" in combined_lower or "core dump" in combined_lower:
+        errors.append("spectre crashed")
+    else:
+        # Fallback: collect raw error lines
+        for line in combined.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            lower = stripped.lower()
+            if "error" in lower and "0 errors" not in lower:
+                errors.append(stripped)
+
     for line in combined.splitlines():
         stripped = line.strip()
-        if not stripped:
-            continue
-        lower = stripped.lower()
-        if "error" in lower and "0 errors" not in lower:
-            errors.append(stripped)
-        elif "warning" in lower and "0 warnings" not in lower:
-            warnings.append(stripped)
+        if stripped:
+            lower = stripped.lower()
+            if "warning" in lower and "0 warnings" not in lower:
+                warnings.append(stripped)
 
     output_dir = run_result.output_dir
     output_files = (
@@ -505,7 +525,7 @@ def _build_simulation_result(
     if run_result.returncode != 0:
         status = ExecutionStatus.PARTIAL if output_files else ExecutionStatus.FAILURE
         if not errors:
-            errors.append(f"Spectre exited with return code {run_result.returncode}")
+            errors.append(f"exit code {run_result.returncode}")
     else:
         status = ExecutionStatus.SUCCESS
 
