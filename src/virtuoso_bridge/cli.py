@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import os
 import re
 import time
@@ -88,14 +89,14 @@ def cli_init() -> int:
 
 # -- start ------------------------------------------------------------------
 
-def _ssh_precheck() -> int | None:
+def _ssh_precheck(profile: str | None = None) -> int | None:
     """Quick SSH connectivity check. Returns exit code on failure, None on success."""
-    ssh_env = remote_ssh_env_from_os(_get_cli_profile())
+    ssh_env = remote_ssh_env_from_os(profile)
 
     if ssh_env.jump_host:
         user = ssh_env.jump_user or ssh_env.remote_user
         runner = SSHRunner(host=ssh_env.jump_host, user=user, connect_timeout=5, persistent_shell=False)
-        if not runner.test_connection(timeout=2):
+        if not runner.test_connection():
             print(f"SSH to jump host {ssh_env.jump_host} failed. Fix SSH first.")
             return 1
 
@@ -106,21 +107,20 @@ def _ssh_precheck() -> int | None:
             jump_host=ssh_env.jump_host, jump_user=jump_user,
             connect_timeout=5, persistent_shell=False,
         )
-        if not runner.test_connection(timeout=2):
+        if not runner.test_connection():
             print(f"SSH to {ssh_env.remote_host} failed. Fix SSH first.")
             return 1
     return None
 
 
-def _start_one() -> int:
-    """Start tunnel for the current profile (read from _CLI_PROFILE)."""
-    profile = _get_cli_profile()
+def _start_one_profile(profile: str | None) -> int:
+    """Start tunnel for a single profile (thread-safe, uses explicit profile)."""
     suffix = f"_{profile}" if profile else ""
     if not os.getenv(f"VB_REMOTE_HOST{suffix}", "").strip():
         print(f"VB_REMOTE_HOST{suffix} is not set. Run: virtuoso-bridge init")
         return 1
 
-    precheck = _ssh_precheck()
+    precheck = _ssh_precheck(profile)
     if precheck is not None:
         return precheck
 
@@ -128,7 +128,7 @@ def _start_one() -> int:
 
     if SSHClient.is_running(profile):
         print("Tunnel already running.")
-        return _print_status()
+        return 0
 
     label = f" [{profile}]" if profile else ""
     print(f"Starting tunnel{label}...")
@@ -154,12 +154,24 @@ def _start_one() -> int:
         print(f"  {manual_cmd}")
         return 1
 
-    return _print_status()
+    return 0
+
+
+def _start_one() -> int:
+    """Start tunnel for the current profile (read from _CLI_PROFILE)."""
+    return _start_one_profile(_get_cli_profile())
 
 
 def cli_start() -> int:
     _load_repo_env()
-    return _for_each_profile(_start_one)
+    profile = _get_cli_profile()
+    if profile is None:
+        profiles = _discover_profiles()
+        if len(profiles) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(profiles)) as ex:
+                list(ex.map(_start_one_profile, profiles))
+            return cli_status()
+    return _start_one_profile(profile)
 
 
 # -- stop -------------------------------------------------------------------
