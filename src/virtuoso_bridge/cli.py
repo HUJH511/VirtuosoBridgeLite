@@ -563,7 +563,9 @@ def cli_sim_jobs() -> int:
         start = _fmt_time(j.get("submitted"))
         end = _fmt_time(j.get("finished"))
         dur = _fmt_duration(j)
-        err = j.get("errors", [""])[0][:35] if j.get("errors") else ""
+        raw_err = j.get("errors", [""])[0] if j.get("errors") else ""
+        # Strip verbose Spectre prefixes for compact display
+        err = raw_err.replace("Error found by spectre during ", "").replace("Spectre exited with ", "")[:30]
         print(f"\033[31m✗\033[0m {j['id']}  {host:<25s} {j['netlist']:<24s} fail     {start}-{end} {dur} {err}")
 
     print()
