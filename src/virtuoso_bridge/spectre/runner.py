@@ -85,6 +85,73 @@ def read_all_jobs() -> list[dict]:
     return jobs
 
 
+def cancel_job(job_id: str) -> str:
+    """Cancel a running simulation by job ID. Returns status message.
+
+    Reads the job record to find the remote host, then SSH-kills the
+    Spectre process using the PID file written at launch.
+    """
+    path = _job_path(job_id)
+    if not path.exists():
+        return f"Job {job_id} not found"
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("status") not in ("running", "queued"):
+        return f"Job {job_id} is already {data.get('status')}"
+
+    remote_host = data.get("remote_host")
+    remote_user = data.get("remote_user")
+    remote_work_dir = data.get("remote_work_dir")
+
+    if not remote_host:
+        _update_job(job_id, {
+            "status": "error",
+            "finished": datetime.now(timezone.utc).isoformat(),
+            "errors": ["cancelled (no remote host to kill process)"],
+        })
+        return f"Job {job_id} marked cancelled (local/no remote info)"
+
+    # SSH in and kill the Spectre process
+    try:
+        runner = SSHRunner(host=remote_host, user=remote_user)
+        # Try to find and kill via PID file in any run dir under the work dir
+        kill_cmd = (
+            f"for f in /tmp/virtuoso_bridge_spectre/*/spectre.pid; do "
+            f"  if [ -f \"$f\" ]; then "
+            f"    pid=$(cat \"$f\"); "
+            f"    if kill -0 $pid 2>/dev/null; then "
+            f"      kill $pid 2>/dev/null && echo \"killed:$pid\"; "
+            f"    fi; "
+            f"  fi; "
+            f"done"
+        )
+        # More targeted: if we know the netlist name, grep for it
+        netlist_name = data.get("netlist", "")
+        if netlist_name:
+            kill_cmd = (
+                f"pgrep -f '{netlist_name}' | while read pid; do "
+                f"  kill $pid 2>/dev/null && echo \"killed:$pid\"; "
+                f"done"
+            )
+
+        result = runner.run_command(kill_cmd, timeout=10)
+        killed = [l for l in (result.stdout or "").splitlines() if l.startswith("killed:")]
+
+        _update_job(job_id, {
+            "status": "error",
+            "finished": datetime.now(timezone.utc).isoformat(),
+            "errors": ["cancelled by user"],
+        })
+
+        if killed:
+            pids = ", ".join(l.split(":")[1] for l in killed)
+            return f"Job {job_id} cancelled (killed PID {pids})"
+        return f"Job {job_id} marked cancelled (process may have already finished)"
+
+    except Exception as exc:
+        return f"Job {job_id} cancel failed: {exc}"
+
+
 SPECTRE_MODE_ARGS: dict[str, list[str]] = {
     "spectre": [],
     "aps": ["+aps"],
@@ -294,10 +361,17 @@ def _run_spectre_remote(
         'HOSTNAME=`hostname 2>/dev/null || echo localhost`; export HOSTNAME && '
         'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" && '
     )
+    pid_file = f"{remote_dir}/spectre.pid"
+    # Wrap spectre command to record PID: run in background, save PID, wait
+    spectre_with_pid = (
+        f"{spectre_command} & SPID=$!; "
+        f"echo $SPID > {shlex.quote(pid_file)}; "
+        f"wait $SPID"
+    )
     exec_cmd = (
         f"{env_setup}"
         f"mkdir -p {shlex.quote(remote_raw_dir)} && "
-        f"csh -c {shlex.quote(f'{csh_body}; {spectre_command}')}"
+        f"csh -c {shlex.quote(f'{csh_body}; {spectre_with_pid}')}"
     )
 
     logger.info("[remote] %s", exec_cmd)
@@ -610,9 +684,15 @@ class SpectreSimulator:
 
     def _run_tracked(self, job_id: str, netlist: Path, params: dict) -> SimulationResult:
         """Run simulation and update the job registry on completion."""
-        _update_job(job_id, {"status": "running"})
+        _update_job(job_id, {
+            "status": "running",
+            "remote_host": self._remote_host,
+            "remote_user": self._remote_user,
+        })
         try:
             result = self.run_simulation(netlist, params)
+            # After simulation, try to extract remote_dir from metadata for cancel support
+            remote_dir = (result.metadata or {}).get("remote_dir")
             _update_job(job_id, {
                 "status": "done" if result.status == ExecutionStatus.SUCCESS else "error",
                 "finished": datetime.now(timezone.utc).isoformat(),

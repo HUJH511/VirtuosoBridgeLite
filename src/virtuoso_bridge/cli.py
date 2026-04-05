@@ -435,6 +435,52 @@ def cli_license() -> int:
 
 # -- main -------------------------------------------------------------------
 
+def _probe_remote_processes(running_jobs: list[dict]) -> dict[str, dict]:
+    """SSH into remote hosts and check Spectre process CPU/MEM usage.
+
+    Groups jobs by remote_host to minimize SSH connections.
+    Returns {job_id: {"cpu": "12.3", "mem": "2.1", "alive": True}}.
+    """
+    from virtuoso_bridge.transport.ssh import SSHRunner
+
+    host_groups: dict[tuple, list[dict]] = {}
+    for j in running_jobs:
+        host = j.get("remote_host")
+        user = j.get("remote_user")
+        if host:
+            host_groups.setdefault((host, user), []).append(j)
+
+    results: dict[str, dict] = {}
+    for (host, user), group_jobs in host_groups.items():
+        try:
+            runner = SSHRunner(host=host, user=user)
+            ps_result = runner.run_command(
+                "ps -eo pid,%cpu,%mem,etime,args 2>/dev/null | grep '[s]pectre'",
+                timeout=5,
+            )
+            ps_lines = (ps_result.stdout or "").strip().splitlines()
+
+            for j in group_jobs:
+                netlist_name = j.get("netlist", "")
+                for line in ps_lines:
+                    if netlist_name and netlist_name in line:
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            results[j["id"]] = {
+                                "cpu": parts[1],
+                                "mem": parts[2],
+                                "etime": parts[3],
+                                "alive": True,
+                            }
+                        break
+                else:
+                    results[j["id"]] = {"alive": False}
+        except Exception:
+            continue
+
+    return results
+
+
 def cli_sim_jobs() -> int:
     """Show status of submitted Spectre simulations."""
     from virtuoso_bridge.spectre.runner import read_all_jobs
@@ -452,6 +498,11 @@ def cli_sim_jobs() -> int:
     print(f"  Simulation Jobs: {len(running)} running, {len(queued)} queued, "
           f"{len(done)} done, {len(errored)} failed\n")
 
+    # Probe remote processes for CPU/MEM on running jobs
+    probes: dict[str, dict] = {}
+    if running:
+        probes = _probe_remote_processes(running)
+
     for j in running + queued:
         status_icon = "\033[33m●\033[0m" if j["status"] == "running" else "\033[90m○\033[0m"
         profile = f" [{j['profile']}]" if j.get("profile") else ""
@@ -463,17 +514,40 @@ def cli_sim_jobs() -> int:
                 elapsed = f"  {int(dt.total_seconds())}s"
             except (ValueError, TypeError):
                 pass
-        print(f"  {status_icon} {j['id']}  {j['netlist']:<30s} {j['status']}{profile}{elapsed}")
 
-    for j in done[-5:]:  # show last 5 finished
+        probe = probes.get(j.get("id", ""), {})
+        cpu_info = ""
+        if probe.get("alive"):
+            cpu_info = f"  CPU:{probe['cpu']}% MEM:{probe['mem']}% [{probe['etime']}]"
+        elif j["status"] == "running" and probe.get("alive") is False:
+            cpu_info = "  \033[90m(process not found)\033[0m"
+
+        print(f"  {status_icon} {j['id']}  {j['netlist']:<30s} {j['status']}{profile}{elapsed}{cpu_info}")
+
+    for j in done[-5:]:
         print(f"  \033[32m✓\033[0m {j['id']}  {j['netlist']:<30s} done")
 
-    for j in errored[-3:]:  # show last 3 errors
+    for j in errored[-3:]:
         err = j.get("errors", [""])[0][:60] if j.get("errors") else ""
         print(f"  \033[31m✗\033[0m {j['id']}  {j['netlist']:<30s} {err}")
 
     print()
     return 0
+
+
+def cli_sim_cancel() -> int:
+    """Cancel a running simulation by job ID."""
+    from virtuoso_bridge.spectre.runner import cancel_job
+    job_id = _SIM_CANCEL_JOB_ID[0]
+    if not job_id:
+        print("Usage: virtuoso-bridge sim-cancel <job-id>")
+        return 1
+    msg = cancel_job(job_id)
+    print(msg)
+    return 0
+
+
+_SIM_CANCEL_JOB_ID: list[str] = [""]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -491,6 +565,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("-p", "--profile", default=None,
                         help="Connection profile (reads VB_*_<profile> env vars)")
     subparsers.add_parser("sim-jobs", help="Show submitted simulation jobs")
+    sp_cancel = subparsers.add_parser("sim-cancel", help="Cancel a running simulation")
+    sp_cancel.add_argument("job_id", help="Job ID to cancel (from sim-jobs)")
     return parser
 
 
@@ -505,11 +581,15 @@ def main(argv: list[str] | None = None) -> int:
         "status": cli_status,
         "license": cli_license,
         "sim-jobs": cli_sim_jobs,
+        "sim-cancel": cli_sim_cancel,
     }
     # Pass profile to commands that support it
     profile = getattr(args, "profile", None)
     if profile is not None:
         _CLI_PROFILE[0] = profile
+    job_id = getattr(args, "job_id", None)
+    if job_id is not None:
+        _SIM_CANCEL_JOB_ID[0] = job_id
     return dispatch[args.command]()
 
 
