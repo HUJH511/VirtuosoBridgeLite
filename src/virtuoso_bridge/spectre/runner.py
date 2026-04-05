@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -427,6 +428,8 @@ class SpectreSimulator:
         self._output_format = output_format
         self._ssh_key_path = ssh_key_path
         self._ssh_config_path = ssh_config_path
+        self._max_workers = 8
+        self._pool: ThreadPoolExecutor | None = None
         self._keep_remote_files = keep_remote_files
         self._ssh_runner: SSHRunner | None = ssh_runner
         self._profile = profile
@@ -522,60 +525,109 @@ class SpectreSimulator:
             return self._run_remote(netlist, params)
         return self._run_local(netlist)
 
-    def run_parallel(
-        self,
-        tasks: list[tuple[Path, dict]],
-        max_workers: int = 8,
-    ) -> list[SimulationResult]:
-        """Run multiple Spectre simulations in parallel.
+    # -- parallel simulation API ---------------------------------------------
 
-        Each task is a ``(netlist_path, params_dict)`` tuple, same arguments
-        as :meth:`run_simulation`.  Simulations execute concurrently via
-        threads — each gets its own remote directory (uuid-based), so there
-        are no file conflicts.  The SSH ControlMaster connection is shared
-        automatically.
+    def _ensure_pool(self) -> ThreadPoolExecutor:
+        """Lazily create the thread pool on first submit."""
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
+        return self._pool
 
-        *max_workers* limits concurrency (default 8).  Set this based on
-        available Spectre licenses and remote CPU cores.
+    def set_max_workers(self, n: int) -> None:
+        """Change the maximum number of concurrent simulations.
 
-        Returns a list of :class:`SimulationResult` in the same order as
-        *tasks*.  Failed simulations return an error result rather than
-        raising an exception.
+        Takes effect on the next :meth:`submit` call if the pool hasn't been
+        created yet, or after :meth:`shutdown` + next submit.
+        """
+        self._max_workers = n
+        if self._pool is not None:
+            logger.warning(
+                "Pool already running with previous max_workers. "
+                "Call shutdown() first to apply the new limit."
+            )
+
+    def submit(self, netlist: Path, params: dict | None = None) -> Future[SimulationResult]:
+        """Submit a simulation to run in the background.
+
+        Returns a :class:`~concurrent.futures.Future` immediately.  The
+        simulation runs in a worker thread — each gets its own remote
+        directory (uuid-based), so there are no file conflicts.  The SSH
+        ControlMaster connection is shared automatically.
 
         Example::
 
             sim = SpectreSimulator.from_env()
-            results = sim.run_parallel([
-                (Path("tb_comparator.scs"), {}),
-                (Path("tb_dac.scs"), {}),
-                (Path("tb_sar_logic.scs"), {"include_files": ["models.scs"]}),
-            ], max_workers=4)
-            for r in results:
-                print(r.status, r.data.get("gain_db"))
+
+            # Submit simulations as needed — don't have to batch them
+            t1 = sim.submit(Path("tb_comparator.scs"))
+            t2 = sim.submit(Path("tb_dac.scs"))
+
+            # Do other work while simulations run...
+
+            # Check without blocking
+            if t1.done():
+                result = t1.result()
+
+            # Or block on a specific one
+            result2 = t2.result()
+
+            # Submit more while others are still running
+            t3 = sim.submit(Path("tb_sar_logic.scs"))
         """
-        from concurrent.futures import ThreadPoolExecutor, Future
+        pool = self._ensure_pool()
+        return pool.submit(self.run_simulation, Path(netlist), params or {})
 
-        n = min(max_workers, len(tasks))
-        print(f"[parallel] Launching {len(tasks)} simulations (max {n} concurrent)")
+    def run_parallel(
+        self,
+        tasks: list[tuple[Path, dict]],
+        max_workers: int | None = None,
+    ) -> list[SimulationResult]:
+        """Submit multiple simulations and wait for all to complete.
 
-        with ThreadPoolExecutor(max_workers=n) as pool:
-            futures: list[Future[SimulationResult]] = []
-            for netlist, params in tasks:
-                futures.append(pool.submit(self.run_simulation, Path(netlist), params))
+        Convenience wrapper around :meth:`submit`.  For fire-and-forget or
+        incremental submission, use :meth:`submit` directly.
 
-            results: list[SimulationResult] = []
-            for i, future in enumerate(futures):
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    results.append(SimulationResult(
-                        status=ExecutionStatus.ERROR,
-                        errors=[f"Parallel task {i} failed: {exc}"],
-                    ))
+        *max_workers* overrides the instance default for this batch only.
+        """
+        if max_workers is not None:
+            old = self._max_workers
+            self._max_workers = max_workers
+            # Force new pool with the override
+            self.shutdown()
 
+        futures = [self.submit(Path(netlist), params) for netlist, params in tasks]
+        results = self.wait_all(futures)
+
+        if max_workers is not None:
+            self._max_workers = old
+            self.shutdown()
+
+        return results
+
+    @staticmethod
+    def wait_all(futures: list[Future[SimulationResult]]) -> list[SimulationResult]:
+        """Wait for all futures and return results in submission order.
+
+        Failed simulations return an error result rather than raising.
+        """
+        results: list[SimulationResult] = []
+        for i, future in enumerate(futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append(SimulationResult(
+                    status=ExecutionStatus.ERROR,
+                    errors=[f"Task {i} failed: {exc}"],
+                ))
         passed = sum(1 for r in results if r.status == ExecutionStatus.SUCCESS)
         print(f"[parallel] Done: {passed}/{len(results)} succeeded")
         return results
+
+    def shutdown(self) -> None:
+        """Shut down the worker pool. A new pool is created on next submit."""
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+            self._pool = None
 
     def check_license(self) -> dict[str, Any]:
         """Check Spectre license availability on the remote host.
