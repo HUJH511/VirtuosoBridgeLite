@@ -54,15 +54,10 @@ class _SpectreRunResult(NamedTuple):
 
 def _resolve_spectre_invocation(
     spectre_cmd: str,
-    spectre_args: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[str, list[str]]:
-    """Split a spectre command string into executable + argument list."""
+    """Split a spectre command string into executable + prefix args (e.g. 'eda spectre' → ('/edadk/bin/eda', ['spectre']))."""
     parts = shlex.split(spectre_cmd) if spectre_cmd.strip() else ["spectre"]
-    spectre_bin = parts[0]
-    extra_args = parts[1:]
-    if spectre_args:
-        extra_args.extend(str(arg) for arg in spectre_args if str(arg).strip())
-    return spectre_bin, extra_args
+    return parts[0], parts[1:]
 
 def spectre_mode_args(mode: str) -> list[str]:
     """Return standard Spectre CLI arguments for a named simulation mode."""
@@ -82,23 +77,18 @@ def _build_spectre_argv(
     log_file: str | None = None,
 ) -> list[str]:
     """Construct a fuller Spectre argv similar to direct production runs."""
-    spectre_bin, base_args = _resolve_spectre_invocation(spectre_cmd, spectre_args)
+    spectre_bin, cmd_prefix_args = _resolve_spectre_invocation(spectre_cmd)
+    mode_args = [str(a) for a in (spectre_args or []) if str(a).strip()]
+    all_flags = cmd_prefix_args + mode_args
     argv = [spectre_bin]
-    if "-64" not in base_args and "-32" not in base_args:
+    # Insert subcommand/wrapper prefix args right after binary (e.g. 'eda spectre')
+    argv.extend(cmd_prefix_args)
+    if "-64" not in all_flags and "-32" not in all_flags:
         argv.append("-64")
     argv.append(netlist_path)
-    if "+lqtimeout" not in base_args:
-        queue_args = ["+lqtimeout", "900"]
-    else:
-        queue_args = []
-    if "-maxw" not in base_args:
-        warning_args = ["-maxw", "5"]
-    else:
-        warning_args = []
-    if "-maxn" not in base_args:
-        notice_args = ["-maxn", "5"]
-    else:
-        notice_args = []
+    queue_args = [] if "+lqtimeout" in all_flags else ["+lqtimeout", "900"]
+    warning_args = [] if "-maxw" in all_flags else ["-maxw", "5"]
+    notice_args = [] if "-maxn" in all_flags else ["-maxn", "5"]
     argv.append("+escchars")
     if log_file:
         argv.extend(["+log", log_file])
@@ -106,7 +96,7 @@ def _build_spectre_argv(
         argv.extend(["-format", output_format])
     if raw_dir:
         argv.extend(["-raw", raw_dir])
-    argv.extend(base_args)
+    argv.extend(mode_args)
     argv.extend(queue_args)
     argv.extend(warning_args)
     argv.extend(notice_args)
