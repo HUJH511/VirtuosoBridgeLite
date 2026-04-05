@@ -503,33 +503,65 @@ def cli_sim_jobs() -> int:
     if running:
         probes = _probe_remote_processes(running)
 
-    for j in running + queued:
-        status_icon = "\033[33m●\033[0m" if j["status"] == "running" else "\033[90m○\033[0m"
-        profile = f" [{j['profile']}]" if j.get("profile") else ""
-        elapsed = ""
-        if j.get("submitted"):
+    def _fmt_time(iso: str | None) -> str:
+        if not iso:
+            return ""
+        try:
+            t = datetime.fromisoformat(iso)
+            return t.strftime("%H:%M:%S")
+        except (ValueError, TypeError):
+            return ""
+
+    def _fmt_host(j: dict) -> str:
+        user = j.get("remote_user", "")
+        host = j.get("remote_host", "")
+        if user and host:
+            return f"{user}@{host}"
+        return host or "local"
+
+    def _fmt_duration(j: dict) -> str:
+        s = j.get("submitted")
+        f = j.get("finished")
+        if s and f:
             try:
-                t0 = datetime.fromisoformat(j["submitted"])
-                dt = datetime.now(timezone.utc) - t0
-                elapsed = f"  {int(dt.total_seconds())}s"
+                dt = datetime.fromisoformat(f) - datetime.fromisoformat(s)
+                return f"{int(dt.total_seconds())}s"
             except (ValueError, TypeError):
                 pass
+        if s:
+            try:
+                dt = datetime.now(timezone.utc) - datetime.fromisoformat(s)
+                return f"{int(dt.total_seconds())}s"
+            except (ValueError, TypeError):
+                pass
+        return ""
+
+    for j in running + queued:
+        status_icon = "\033[33m●\033[0m" if j["status"] == "running" else "\033[90m○\033[0m"
+        host = _fmt_host(j)
+        start = _fmt_time(j.get("submitted"))
+        dur = _fmt_duration(j)
 
         probe = probes.get(j.get("id", ""), {})
         cpu_info = ""
         if probe.get("alive"):
-            cpu_info = f"  CPU:{probe['cpu']}% MEM:{probe['mem']}% [{probe['etime']}]"
+            cpu_info = f"  CPU:{probe['cpu']}% MEM:{probe['mem']}%"
         elif j["status"] == "running" and probe.get("alive") is False:
             cpu_info = "  \033[90m(process not found)\033[0m"
 
-        print(f"  {status_icon} {j['id']}  {j['netlist']:<30s} {j['status']}{profile}{elapsed}{cpu_info}")
+        print(f"  {status_icon} {j['id']}  {j['netlist']:<28s} {j['status']:<8s} {host:<25s} {start}  {dur}{cpu_info}")
 
     for j in done[-5:]:
-        print(f"  \033[32m✓\033[0m {j['id']}  {j['netlist']:<30s} done")
+        host = _fmt_host(j)
+        start = _fmt_time(j.get("submitted"))
+        end = _fmt_time(j.get("finished"))
+        dur = _fmt_duration(j)
+        print(f"  \033[32m✓\033[0m {j['id']}  {j['netlist']:<28s} done     {host:<25s} {start}-{end}  {dur}")
 
     for j in errored[-3:]:
-        err = j.get("errors", [""])[0][:60] if j.get("errors") else ""
-        print(f"  \033[31m✗\033[0m {j['id']}  {j['netlist']:<30s} {err}")
+        host = _fmt_host(j)
+        err = j.get("errors", [""])[0][:50] if j.get("errors") else ""
+        print(f"  \033[31m✗\033[0m {j['id']}  {j['netlist']:<28s} {host:<25s} {err}")
 
     print()
     return 0
