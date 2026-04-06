@@ -5,7 +5,7 @@ from virtuoso_bridge.virtuoso.maestro.session import (
     close_session,
     find_open_session,
 )
-from virtuoso_bridge.virtuoso.maestro.reader import read_config
+from virtuoso_bridge.virtuoso.maestro.reader import read_config, read_env, read_results
 from virtuoso_bridge.virtuoso.maestro.writer import (
     # test
     create_test,
@@ -52,6 +52,8 @@ __all__ = [
     "find_open_session",
     # read
     "read_config",
+    "read_env",
+    "read_results",
     # write - test
     "create_test",
     "set_design",

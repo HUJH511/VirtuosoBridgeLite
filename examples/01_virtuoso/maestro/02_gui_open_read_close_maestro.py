@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import read_config
+from virtuoso_bridge.virtuoso.maestro import read_config, read_env, read_results
 
 LIB  = "PLAYGROUND_AMP"
 CELL = "TB_AMP_5T_D2S_DC_AC"
@@ -43,9 +43,21 @@ let((before after session)
         return 1
     print(f"Session: {ses}\n")
 
-    for key, (skill_expr, raw) in read_config(client, ses).items():
-        print(f"[{key}] {skill_expr}")
-        print(raw)
+    def _print(data):
+        for key, (skill_expr, raw) in data.items():
+            print(f"[{key}] {skill_expr}")
+            print(raw)
+
+    print("=== Config ===")
+    _print(read_config(client, ses))
+    print("\n=== Environment ===")
+    _print(read_env(client, ses))
+    print("\n=== Results ===")
+    results = read_results(client, ses)
+    if results:
+        _print(results)
+    else:
+        print("(no simulation results)")
 
     # GUI close
     client.execute_skill(f'''

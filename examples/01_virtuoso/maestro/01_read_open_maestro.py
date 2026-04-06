@@ -12,7 +12,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import find_open_session, read_config
+from virtuoso_bridge.virtuoso.maestro import (
+    find_open_session, read_config, read_env, read_results,
+)
+
+
+def _print(data: dict) -> None:
+    for key, (skill_expr, raw) in data.items():
+        print(f"[{key}] {skill_expr}")
+        print(raw)
 
 
 def main() -> int:
@@ -23,9 +31,19 @@ def main() -> int:
         print("No active maestro session found.")
         return 1
 
-    for key, (skill_expr, raw) in read_config(client, ses, verbose=2).items():
-        print(f"[{key}] {skill_expr}")
-        print(raw)
+    print("=== Config ===")
+    _print(read_config(client, ses))
+
+    print("\n=== Environment ===")
+    _print(read_env(client, ses))
+
+    print("\n=== Results ===")
+    results = read_results(client, ses)
+    if results:
+        _print(results)
+    else:
+        print("(no simulation results)")
+
     return 0
 
 
