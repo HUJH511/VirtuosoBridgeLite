@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""Open a maestro GUI window, read its config, then close the window.
-
-Unlike 03 (background only), this opens the maestro in Virtuoso GUI so
-the user can see it, reads the config, then closes the window.
+"""Open a maestro GUI window, read config, then close the window.
 
 Edit LIB and CELL below.
-
-Usage:
-    python 04_gui_open_read_close_maestro.py
 """
 
 import sys
@@ -16,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import read_config, read_env, read_results
+from virtuoso_bridge.virtuoso.maestro import read_config
 
 LIB  = "PLAYGROUND_AMP"
 CELL = "TB_AMP_5T_D2S_DC_AC"
@@ -25,7 +19,7 @@ CELL = "TB_AMP_5T_D2S_DC_AC"
 def main() -> int:
     client = VirtuosoClient.from_env()
 
-    # GUI open: deOpenCellView + find new session
+    # GUI open
     r = client.execute_skill(f'''
 let((before after session)
   before = maeGetSessions()
@@ -33,7 +27,7 @@ let((before after session)
   after = maeGetSessions()
   session = nil
   foreach(s after unless(member(s before) session = s))
-  printf("[MaestroOpen@%s] %s/%s  session=%s\\n" getCurrentTime() "{LIB}" "{CELL}" session)
+  printf("[%s MaestroOpen] %s/%s  session=%s\\n" nth(2 parseString(getCurrentTime())) "{LIB}" "{CELL}" session)
   session
 )
 ''')
@@ -41,23 +35,10 @@ let((before after session)
     if not ses or ses in ("nil", "t"):
         print(f"MaestroOpen failed for {LIB}/{CELL}")
         return 1
-    print(f"Session: {ses}\n")
 
-    def _print(data):
-        for key, (skill_expr, raw) in data.items():
-            print(f"[{key}] {skill_expr}")
-            print(raw)
-
-    print("=== Config ===")
-    _print(read_config(client, ses))
-    print("\n=== Environment ===")
-    _print(read_env(client, ses))
-    print("\n=== Results ===")
-    results = read_results(client, ses)
-    if results:
-        _print(results)
-    else:
-        print("(no simulation results)")
+    for key, (skill_expr, raw) in read_config(client, ses).items():
+        print(f"[{key}] {skill_expr}")
+        print(raw)
 
     # GUI close
     client.execute_skill(f'''
@@ -71,7 +52,7 @@ foreach(win hiGetWindowList()
     )
   )
 )
-printf("[MaestroClose@%s] %s/%s closed\\n" getCurrentTime() "{LIB}" "{CELL}")
+printf("[%s MaestroClose] %s/%s closed\\n" nth(2 parseString(getCurrentTime())) "{LIB}" "{CELL}")
 ''')
     return 0
 

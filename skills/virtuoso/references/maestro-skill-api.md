@@ -494,10 +494,12 @@ client.download_file('/tmp/results.csv', 'output/results.csv')
 
 ## Examples
 
-- `examples/01_virtuoso/maestro/01_read_open_maestro.py` — read the currently open maestro window (no open/close)
-- `examples/01_virtuoso/maestro/02_gui_open_read_close_maestro.py` — GUI open → read config → close window (`deOpenCellView` / `hiCloseWindow`)
-- `examples/01_virtuoso/maestro/03_open_read_close_maestro.py` — background open → read config → close (`maeOpenSetup` / `maeCloseSession`)
-- `examples/01_virtuoso/maestro/04_rc_filter_sweep.py` — complete Maestro workflow (create schematic, AC analysis, parametric sweep, read results, display in GUI)
+- `examples/01_virtuoso/maestro/01_read_open_maestro.py` — read config from open maestro
+- `examples/01_virtuoso/maestro/02_gui_open_read_close_maestro.py` — GUI open → read config → close
+- `examples/01_virtuoso/maestro/03_bg_open_read_close_maestro.py` — background open → read config → close
+- `examples/01_virtuoso/maestro/04_read_env.py` — read environment settings
+- `examples/01_virtuoso/maestro/05_read_results.py` — read simulation results
+- `examples/01_virtuoso/maestro/06_rc_filter_sweep.py` — full workflow: create + simulate + read
 
 ## See also
 

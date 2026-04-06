@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Read config from the currently open maestro window. Does not open or close anything.
+"""Open a maestro in background, read config, then close it.
 
-Usage:
-    1. Open a maestro view in Virtuoso GUI
-    2. Run this script
+Edit LIB and CELL below.
 """
 
 import sys
@@ -12,20 +10,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import find_open_session, read_config
+from virtuoso_bridge.virtuoso.maestro import open_session, close_session, read_config
+
+LIB  = "PLAYGROUND_AMP"
+CELL = "TB_AMP_5T_D2S_DC_AC"
 
 
 def main() -> int:
     client = VirtuosoClient.from_env()
 
-    ses = find_open_session(client)
-    if ses is None:
-        print("No active maestro session found.")
-        return 1
+    ses = open_session(client, LIB, CELL)
 
     for key, (skill_expr, raw) in read_config(client, ses).items():
         print(f"[{key}] {skill_expr}")
         print(raw)
+
+    close_session(client, ses)
     return 0
 
 

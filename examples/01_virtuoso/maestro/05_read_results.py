@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read config from the currently open maestro window. Does not open or close anything.
+"""Read simulation results from an open maestro: output values, specs, yield.
 
 Usage:
-    1. Open a maestro view in Virtuoso GUI
+    1. Open a maestro view in Virtuoso GUI (must have run a simulation)
     2. Run this script
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import find_open_session, read_config
+from virtuoso_bridge.virtuoso.maestro import find_open_session, read_results
 
 
 def main() -> int:
@@ -23,7 +23,12 @@ def main() -> int:
         print("No active maestro session found.")
         return 1
 
-    for key, (skill_expr, raw) in read_config(client, ses).items():
+    results = read_results(client, ses)
+    if not results:
+        print("No simulation results found.")
+        return 1
+
+    for key, (skill_expr, raw) in results.items():
         print(f"[{key}] {skill_expr}")
         print(raw)
     return 0

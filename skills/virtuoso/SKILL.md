@@ -104,10 +104,12 @@ Load on demand — each contains detailed API docs and edge-case guidance:
 - `07–10` — delete/clear operations
 
 ### `examples/01_virtuoso/maestro/`
-- `01_read_open_maestro.py` — read the currently open maestro window
-- `02_gui_open_read_close_maestro.py` — GUI open → read → close
-- `03_open_read_close_maestro.py` — background open → read → close
-- `04_rc_filter_sweep.py` — full workflow: create schematic, AC analysis, sweep, specs, results
+- `01_read_open_maestro.py` — read config from the currently open maestro
+- `02_gui_open_read_close_maestro.py` — GUI open → read config → close
+- `03_bg_open_read_close_maestro.py` — background open → read config → close
+- `04_read_env.py` — read environment settings (model files, sim options, run mode)
+- `05_read_results.py` — read simulation results (output values, specs, yield)
+- `06_rc_filter_sweep.py` — full workflow: create schematic, AC analysis, sweep, specs, results
 
 ## Related skills
 

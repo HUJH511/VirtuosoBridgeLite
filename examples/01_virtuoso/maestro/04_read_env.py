@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read config from the currently open maestro window. Does not open or close anything.
+"""Read environment settings from an open maestro: model files, sim options, run mode.
 
 Usage:
     1. Open a maestro view in Virtuoso GUI
@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import find_open_session, read_config
+from virtuoso_bridge.virtuoso.maestro import find_open_session, read_env
 
 
 def main() -> int:
@@ -23,7 +23,7 @@ def main() -> int:
         print("No active maestro session found.")
         return 1
 
-    for key, (skill_expr, raw) in read_config(client, ses).items():
+    for key, (skill_expr, raw) in read_env(client, ses).items():
         print(f"[{key}] {skill_expr}")
         print(raw)
     return 0
