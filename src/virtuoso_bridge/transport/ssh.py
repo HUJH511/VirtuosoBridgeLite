@@ -1013,7 +1013,7 @@ class SSHRunner:
             "-o", f"ConnectTimeout={self._connect_timeout}",
             "-o", "ControlMaster=auto",
             "-o", f"ControlPath={self._control_path}",
-            "-o", "ControlPersist=300",
+            "-o", "ControlPersist=3600",
         ]
         if self._ssh_config_path:
             opts += ["-F", str(self._ssh_config_path)]
