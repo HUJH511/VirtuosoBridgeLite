@@ -1,5 +1,23 @@
 # Maestro SKILL API Reference
 
+## Two Session Modes
+
+| | Background (`maeOpenSetup`) | GUI (`deOpenCellView`) |
+|---|---|---|
+| Lock file | Creates `.cdslck` | Creates `.cdslck` |
+| Read config | Yes | Yes |
+| Write config | Yes | Yes (needs `maeMakeEditable`) |
+| Run simulation | Can start, but `maeCloseSession` cancels it | Yes |
+| `maeWaitUntilDone` | Returns immediately (does not wait) | Blocks until done |
+| Close | `maeCloseSession` → lock removed | `hiCloseWindow` → may trigger dialog |
+| Crash residue | Lock file remains | Lock file remains |
+
+**Rule of thumb: use background for read/write config, use GUI for simulation.**
+
+Residual lock cleanup: first try `maeCloseSession` on any stale sessions (`maeGetSessions`). Only delete `.cdslck` manually if no active session exists (e.g. after Virtuoso crash).
+
+---
+
 ## Table of Contents
 
 1. [Supported ADE Types](#supported-ade-types)

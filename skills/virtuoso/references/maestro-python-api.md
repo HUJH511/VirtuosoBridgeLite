@@ -9,6 +9,19 @@ from virtuoso_bridge import VirtuosoClient
 from virtuoso_bridge.virtuoso.maestro import open_session, close_session, read_config
 ```
 
+## Two Session Modes
+
+| | Background (`open_session`) | GUI (`deOpenCellView`) |
+|---|---|---|
+| Lock file | Creates `.cdslck` | Creates `.cdslck` |
+| Read config | Yes | Yes |
+| Write config | Yes | Yes (needs `maeMakeEditable`) |
+| Run simulation | Can start, but `close_session` cancels it | Yes |
+| `wait_until_done` | Returns immediately (does not wait) | Blocks until done |
+| Close | `close_session` → lock removed | `hiCloseWindow` |
+
+**Use background for read/write config. Use GUI for simulation.**
+
 ## Session Management
 
 `maestro/session.py`
