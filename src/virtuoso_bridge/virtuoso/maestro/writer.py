@@ -306,3 +306,41 @@ def save_setup(client: VirtuosoClient, lib: str, cell: str, *,
     s = f' ?session "{session}"' if session else ""
     return _q(client,
         f'maeSaveSetup(?lib "{lib}" ?cell "{cell}" ?view "maestro"{s})')
+
+
+# ---------------------------------------------------------------------------
+# GUI
+# ---------------------------------------------------------------------------
+
+def open_maestro_gui_with_history(client: VirtuosoClient, lib: str, cell: str,
+                                  *, history: str = "") -> str:
+    """Open Maestro GUI window and display a simulation history.
+
+    If history is not given, auto-detects the latest from asiGetResultsDir.
+
+    Steps:
+        1. asiGetResultsDir → extract history name
+        2. deOpenCellView → open GUI window (read mode)
+        3. maeMakeEditable → switch to edit mode
+        4. maeRestoreHistory → load history results into GUI
+        5. maeSaveSetup → persist
+
+    Returns the history name.
+    """
+    import re
+
+    # Auto-detect history name
+    if not history:
+        r = client.execute_skill('asiGetResultsDir(asiGetCurrentSession())')
+        rd = (r.output or "").strip('"')
+        m = re.search(r'/maestro/results/maestro/([^/]+)/', rd)
+        if not m:
+            raise RuntimeError("No simulation history found")
+        history = m.group(1)
+
+    _q(client, f'deOpenCellView("{lib}" "{cell}" "maestro" "maestro" nil "r")')
+    _q(client, 'maeMakeEditable()')
+    _q(client, f'maeRestoreHistory("{history}")')
+    _q(client, f'maeSaveSetup(?lib "{lib}" ?cell "{cell}" ?view "maestro")')
+
+    return history

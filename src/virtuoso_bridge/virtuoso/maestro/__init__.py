@@ -43,6 +43,8 @@ from virtuoso_bridge.virtuoso.maestro.writer import (
     migrate_adexl_to_maestro,
     # save
     save_setup,
+    # GUI
+    open_maestro_gui_with_history,
 )
 
 __all__ = [
@@ -91,4 +93,6 @@ __all__ = [
     "migrate_adexl_to_maestro",
     # write - save
     "save_setup",
+    # write - GUI
+    "open_maestro_gui_with_history",
 ]

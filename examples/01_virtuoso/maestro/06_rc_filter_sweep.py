@@ -21,7 +21,6 @@ Expected result:
     C = 100 fF -> f_3dB ~ 1.59 GHz
 """
 
-import re
 import sys
 from pathlib import Path
 
@@ -43,6 +42,7 @@ from virtuoso_bridge.virtuoso.maestro import (
     wait_until_done,
     read_results,
     export_waveform,
+    open_maestro_gui_with_history,
 )
 
 LIB = "PLAYGROUND_LLM"
@@ -272,31 +272,6 @@ def export_waveforms(client: VirtuosoClient, session: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Open Maestro GUI with history results
-# ---------------------------------------------------------------------------
-
-def open_maestro_with_history(client: VirtuosoClient) -> None:
-    """Open the Maestro GUI and display the latest simulation history."""
-    # Get results dir to find history name
-    r = skill(client, "asiGetResultsDir(asiGetCurrentSession())")
-    rd = (r.output or "").strip('"')
-    m = re.search(r'/maestro/results/maestro/([^/]+)/', rd)
-    if not m:
-        print("[open] No simulation history found")
-        return
-    latest = m.group(1)
-    print(f"[open] Opening history: {latest}")
-
-    # Open GUI → editable → restore → save
-    skill(client,
-          f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")')
-    skill(client, "maeMakeEditable()")
-    skill(client, f'maeRestoreHistory("{latest}")')
-    save_setup(client, LIB, CELL)
-    print(f"[open] Maestro opened with {latest}")
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -331,7 +306,8 @@ def main() -> int:
 
     # 6. Open Maestro GUI with latest history
     close_session(client, session)
-    open_maestro_with_history(client)
+    history = open_maestro_gui_with_history(client, LIB, CELL)
+    print(f"[open] Maestro opened with {history}")
 
     return 0
 
