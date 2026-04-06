@@ -9,7 +9,7 @@ def open_session(client: VirtuosoClient, lib: str, cell: str) -> str:
     """Open maestro in background via maeOpenSetup. Returns session string."""
     r = client.execute_skill(
         f'let((ses) ses = maeOpenSetup("{lib}" "{cell}" "maestro") '
-        f'printf("[maeOpenSetup@%s] %s/%s  session=%s\\n" getCurrentTime() "{lib}" "{cell}" ses) '
+        f'printf("[%s maeOpenSetup] %s/%s  session=%s\\n" nth(2 parseString(getCurrentTime())) "{lib}" "{cell}" ses) '
         f'ses)')
     ses = (r.output or "").strip('"')
     if not ses or ses in ("nil", "t"):
@@ -21,7 +21,7 @@ def close_session(client: VirtuosoClient, ses: str) -> None:
     """Close a background maestro session via maeCloseSession."""
     client.execute_skill(
         f'maeCloseSession(?session "{ses}" ?forceClose t) '
-        f'printf("[maeCloseSession@%s] session=%s closed\\n" getCurrentTime() "{ses}")')
+        f'printf("[%s maeCloseSession] session=%s closed\\n" nth(2 parseString(getCurrentTime())) "{ses}")')
 
 
 def find_open_session(client: VirtuosoClient) -> str | None:

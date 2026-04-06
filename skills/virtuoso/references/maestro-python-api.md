@@ -31,23 +31,45 @@ close_session(client, ses)
 
 | Python | SKILL functions called |
 |--------|-----------------------|
-| `read_config(client, ses) -> dict[str, str]` | See below |
+| `read_config(client, ses, verbose=1) -> dict[str, tuple[str, str]]` | See below |
 
-Returns a dict where keys = SKILL function names, values = raw SKILL output.
+Returns a dict where key = label, value = `(skill_expr, raw_output)`.
+- `skill_expr` — exact SKILL expression, can be pasted into CIW to reproduce
+- `raw_output` — raw SKILL return value
 
-Queries made by `read_config`:
+### Verbosity levels
+
+| verbose | What it reads | Use case |
+|---------|---------------|----------|
+| **0** | tests, enabled analyses, outputs, variables | Quick overview |
+| **1** (default) | + per-analysis params, parameters, corners | Full setup |
+| **2** | + envOption, simOption, runMode, jobControl, simulation results | Everything |
+
+### Queries by level
+
+**Level 0** — quick overview:
 
 | Key | SKILL |
 |-----|-------|
 | `maeGetSetup` | `maeGetSetup(?session ses)` |
 | `maeGetEnabledAnalysis` | `maeGetEnabledAnalysis(test ?session ses)` |
-| `maeGetAnalysis:<name>` | `maeGetAnalysis(test name ?session ses)` |
-| `maeGetTestOutputs` | `maeGetTestOutputs(test ?session ses)` — outputs `(name type signal expression)` |
+| `maeGetTestOutputs` | `maeGetTestOutputs(test ?session ses)` — returns `(name type signal expression)` |
 | `variables` | `maeGetSetup(?session ses ?typeName "variables")` |
+
+**Level 1** — adds full setup:
+
+| Key | SKILL |
+|-----|-------|
+| `maeGetAnalysis:<name>` | `maeGetAnalysis(test name ?session ses)` — one per enabled analysis |
 | `parameters` | `maeGetSetup(?session ses ?typeName "parameters")` |
 | `corners` | `maeGetSetup(?session ses ?typeName "corners")` |
-| `maeGetEnvOption` | `maeGetEnvOption(test ?session ses)` — all env options |
-| `maeGetSimOption` | `maeGetSimOption(test ?session ses)` — all sim options |
+
+**Level 2** — adds env/sim/results:
+
+| Key | SKILL |
+|-----|-------|
+| `maeGetEnvOption` | `maeGetEnvOption(test ?session ses)` — all env options (model files, view lists, ...) |
+| `maeGetSimOption` | `maeGetSimOption(test ?session ses)` — all sim options (reltol, temp, ...) |
 | `maeGetCurrentRunMode` | `maeGetCurrentRunMode(?session ses)` |
 | `maeGetJobControlMode` | `maeGetJobControlMode(?session ses)` |
 | `maeGetResultTests` | `maeGetResultTests()` — only if results exist |
@@ -60,9 +82,18 @@ Queries made by `read_config`:
 
 ```python
 ses = open_session(client, "PLAYGROUND_AMP", "TB_AMP_5T_D2S_DC_AC")
-for key, raw in read_config(client, ses).items():
-    print(f"[{key}]")
+
+# Quick overview
+for key, (skill_expr, raw) in read_config(client, ses, verbose=0).items():
+    print(f"[{key}] {skill_expr}")
     print(raw)
+
+# Full setup (default)
+read_config(client, ses)
+
+# Everything including env options and simulation results
+read_config(client, ses, verbose=2)
+
 close_session(client, ses)
 ```
 

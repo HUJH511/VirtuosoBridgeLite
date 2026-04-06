@@ -25,8 +25,8 @@ def main() -> int:
     ses = open_session(client, LIB, CELL)
     print(f"Session: {ses}\n")
 
-    for key, raw in read_config(client, ses).items():
-        print(f"[{key}]")
+    for key, (skill_expr, raw) in read_config(client, ses).items():
+        print(f"[{key}] {skill_expr}")
         print(raw)
 
     close_session(client, ses)

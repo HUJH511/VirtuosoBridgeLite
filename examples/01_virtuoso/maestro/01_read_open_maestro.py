@@ -23,8 +23,8 @@ def main() -> int:
         print("No active maestro session found.")
         return 1
 
-    for key, raw in read_config(client, ses).items():
-        print(f"[{key}]")
+    for key, (skill_expr, raw) in read_config(client, ses, verbose=2).items():
+        print(f"[{key}] {skill_expr}")
         print(raw)
     return 0
 

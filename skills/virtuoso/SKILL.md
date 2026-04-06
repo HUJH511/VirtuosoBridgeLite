@@ -46,7 +46,7 @@ with client.schematic.edit(lib, cell) as sch:
     sch.add_pin("VDD", "inputOutput", (0, 1.0))
 ```
 
-Use terminal-aware helpers (`add_wire_between_instance_terms`, `add_net_label_to_instance_term`) instead of guessing pin coordinates — they resolve positions from the database. See `references/schematic.md` for full API.
+Use terminal-aware helpers (`add_wire_between_instance_terms`, `add_net_label_to_instance_term`) instead of guessing pin coordinates — they resolve positions from the database. See `references/schematic-skill-api.md` for full API.
 
 ### Layout editing
 
@@ -58,7 +58,7 @@ with client.layout.edit(lib, cell) as layout:
     layout.add_via("M1_M2", (0.5, 0.25))
 ```
 
-For large edits: split into chunks — first call with `mode="w"` (create), then `mode="a"` (append). Screenshot after layout work to verify visually. See `references/layout.md` for full API.
+For large edits: split into chunks — first call with `mode="w"` (create), then `mode="a"` (append). Screenshot after layout work to verify visually. See `references/layout-skill-api.md` for full API.
 
 ### Inline SKILL (for anything beyond the Python API)
 
@@ -89,30 +89,78 @@ client.close_current_cellview()
 client.run_shell_command("ls /tmp/")
 ```
 
-## ADE control (Maestro)
+## Maestro (ADE Assembler)
 
-Quick pattern — open session, configure, run, read results:
+Python package: `virtuoso_bridge.virtuoso.maestro` — session management, read config, write config.
+
+### Read existing config
 
 ```python
-ses = client.execute_skill(f'maeOpenSetup("{lib}" "{cell}" "maestro")').output.strip('"')
-client.execute_skill(f'maeCreateTest("AC" ?lib "{lib}" ?cell "{cell}" ?view "schematic" ?simulator "spectre" ?session "{ses}")')
-client.execute_skill(f'maeSetAnalysis("AC" "ac" ?enable t ?options `(("start" "1") ("stop" "10G") ("dec" "20")) ?session "{ses}")')
-client.execute_skill(f'maeSaveSetup(?lib "{lib}" ?cell "{cell}" ?view "maestro" ?session "{ses}")')
-client.execute_skill('maeRunSimulation()')
-client.execute_skill("maeWaitUntilDone('All)")
+from virtuoso_bridge.virtuoso.maestro import open_session, close_session, read_config
+
+ses = open_session(client, lib, cell)
+cfg = read_config(client, ses)            # verbose=1 (default)
+cfg = read_config(client, ses, verbose=0) # quick: tests + analyses + outputs + vars
+cfg = read_config(client, ses, verbose=2) # everything: + env/sim options + results
+for key, (skill_expr, raw) in cfg.items():
+    print(f"[{key}] {skill_expr}")
+    print(raw)
+close_session(client, ses)
 ```
 
-For the full API (variables, outputs, specs, corners, OCEAN results, history display), read `references/maestro.md`. See `examples/01_virtuoso/maestro/04_rc_filter_sweep.py` for the complete workflow.
+### Modify config
+
+```python
+from virtuoso_bridge.virtuoso.maestro import (
+    open_session, close_session, save_setup,
+    create_test, set_analysis, add_output, set_spec, set_var,
+    set_env_option, set_sim_option, set_corner, set_design,
+    run_simulation, wait_until_done,
+)
+
+ses = open_session(client, lib, cell)
+
+# Create test + analysis
+create_test(client, "AC", lib=lib, cell=cell, ses=ses)
+set_analysis(client, "AC", "ac", options='(("start" "1") ("stop" "10G") ("dec" "20"))', ses=ses)
+set_analysis(client, "AC", "tran", enable=False, ses=ses)
+
+# Add outputs + spec
+add_output(client, "Vout", "AC", output_type="net", signal_name="/OUT", ses=ses)
+add_output(client, "BW", "AC", expr='bandwidth(mag(VF(\\"/OUT\\")) 3 \\"low\\")', ses=ses)
+set_spec(client, "BW", "AC", gt="1G", ses=ses)
+
+# Variables
+set_var(client, "vdd", "1.35", ses=ses)
+
+# Model files
+set_env_option(client, "AC", '(("modelFiles" (("/path/model.scs" "tt"))))', ses=ses)
+
+# Corner sweep
+set_corner(client, "myCorner", disable_tests='("TRAN")', ses=ses)
+set_var(client, "vdd", "1.2 1.4", type_name="corner", type_value='("myCorner")', ses=ses)
+
+# Save + run
+save_setup(client, lib, cell, ses=ses)
+run_simulation(client, ses=ses)
+wait_until_done(client, timeout=600)
+
+close_session(client, ses)
+```
+
+For full API details see `references/maestro-python-api.md`.
+For SKILL function reference see `references/maestro-skill-api.md`.
+See `examples/01_virtuoso/maestro/` for runnable examples.
 
 ## References
 
 Load only when needed — these contain detailed API docs and edge-case guidance:
 
-- `references/schematic.md` — schematic SKILL API, terminal-aware helpers, CDF parameter setting
+- `references/schematic-skill-api.md` — schematic SKILL API, terminal-aware helpers, CDF parameter setting
 - `references/schematic-python-api.md` — schematic Python API (SchematicEditor, SchematicOps)
-- `references/layout.md` — layout SKILL API, read/query, mosaic, layer control
+- `references/layout-skill-api.md` — layout SKILL API, read/query, mosaic, layer control
 - `references/layout-python-api.md` — layout Python API (LayoutEditor, LayoutOps)
-- `references/maestro.md` — Maestro SKILL API (mae* functions, OCEAN, corners)
+- `references/maestro-skill-api.md` — Maestro SKILL API (mae* functions, OCEAN, corners)
 - `references/maestro-python-api.md` — Maestro Python API (session, reader, writer)
 - `references/netlist.md` — CDL/Spectre netlist formats, spiceIn import, netlist export
 

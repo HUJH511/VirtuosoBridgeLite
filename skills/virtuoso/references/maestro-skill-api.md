@@ -1,4 +1,4 @@
-# ADE Reference
+# Maestro SKILL API Reference
 
 ## Table of Contents
 

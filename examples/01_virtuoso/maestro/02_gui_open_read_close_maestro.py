@@ -43,8 +43,8 @@ let((before after session)
         return 1
     print(f"Session: {ses}\n")
 
-    for key, raw in read_config(client, ses).items():
-        print(f"[{key}]")
+    for key, (skill_expr, raw) in read_config(client, ses).items():
+        print(f"[{key}] {skill_expr}")
         print(raw)
 
     # GUI close
