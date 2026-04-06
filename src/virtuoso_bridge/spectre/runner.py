@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import shlex
+import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -17,6 +19,7 @@ from typing import Any, NamedTuple
 
 from virtuoso_bridge.models import ExecutionStatus, SimulationResult
 from virtuoso_bridge.spectre.parsers import parse_psf_ascii_directory
+from virtuoso_bridge.transport.tunnel import _is_localhost
 from virtuoso_bridge.transport.remote_paths import (
     default_remote_spectre_work_dir,
     resolve_remote_username,
@@ -103,13 +106,37 @@ def cancel_job(job_id: str) -> str:
     remote_user = data.get("remote_user")
     remote_work_dir = data.get("remote_work_dir")
 
-    if not remote_host:
+    if not remote_host or _is_localhost(remote_host):
+        # Local mode: find and kill Spectre processes by netlist name
+        netlist_name = data.get("netlist", "")
+        killed_pids: list[int] = []
+        if netlist_name:
+            try:
+                pgrep = subprocess.run(
+                    ["pgrep", "-f", netlist_name],
+                    capture_output=True, text=True,
+                )
+                for line in pgrep.stdout.strip().splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        pid = int(line)
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                            killed_pids.append(pid)
+                        except ProcessLookupError:
+                            pass
+            except Exception:
+                pass
+
         _update_job(job_id, {
             "status": "error",
             "finished": datetime.now(timezone.utc).isoformat(),
-            "errors": ["cancelled (no remote host to kill process)"],
+            "errors": ["cancelled by user"],
         })
-        return f"Job {job_id} marked cancelled (local/no remote info)"
+        if killed_pids:
+            pids_str = ", ".join(str(p) for p in killed_pids)
+            return f"Job {job_id} cancelled (killed PID {pids_str})"
+        return f"Job {job_id} marked cancelled (process may have already finished)"
 
     # SSH in and kill the Spectre process
     try:
@@ -621,12 +648,28 @@ class SpectreSimulator:
         ssh_runner: SSHRunner | None = None,
         profile: str | None = None,
     ) -> "SpectreSimulator":
-        """Create a remote SpectreSimulator from environment variables.
+        """Create a SpectreSimulator from environment variables.
 
-        Automatically reuses the SSH connection managed by ``virtuoso-bridge
-        start`` (via ControlMaster).  If *profile* is given, uses that
-        profile's connection.  Raises RuntimeError if no connection is available.
+        If the configured remote host is localhost (or unset with a localhost
+        env var), returns a local simulator.  Otherwise automatically reuses
+        the SSH connection managed by ``virtuoso-bridge start`` (via
+        ControlMaster).  Raises RuntimeError if no remote connection is
+        available.
         """
+        # Check if we should run locally
+        suffix = f"_{profile}" if profile else ""
+        remote_host = os.environ.get(f"VB_REMOTE_HOST{suffix}", "") or os.environ.get("VB_REMOTE_HOST", "")
+        if remote_host and _is_localhost(remote_host):
+            return cls(
+                spectre_cmd=spectre_cmd,
+                spectre_args=spectre_args,
+                timeout=timeout,
+                work_dir=work_dir,
+                output_format=output_format,
+                keep_remote_files=keep_remote_files,
+                profile=profile,
+            )
+
         if ssh_runner is None:
             from virtuoso_bridge.transport.tunnel import SSHClient
             if not SSHClient.is_running(profile):
@@ -851,8 +894,41 @@ class SpectreSimulator:
 
         Returns a dict with keys: ok, spectre_path, version, licenses.
         """
-        if not self._remote_host:
-            return {"ok": False, "error": "No remote host configured"}
+        if not self._remote_host or _is_localhost(self._remote_host):
+            # Local mode: check spectre directly on this machine
+            info: dict[str, Any] = {
+                "ok": False,
+                "spectre_path": None,
+                "version": None,
+                "licenses": [],
+            }
+            spectre_path = shutil.which(self._spectre_cmd)
+            if spectre_path:
+                info["spectre_path"] = spectre_path
+                info["ok"] = True
+                try:
+                    ver = subprocess.run(
+                        [self._spectre_cmd, "-V"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    ver_line = (ver.stdout or ver.stderr or "").strip().splitlines()
+                    if ver_line:
+                        info["version"] = ver_line[0]
+                except Exception:
+                    pass
+                try:
+                    lm = subprocess.run(
+                        ["lmstat", "-a"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    for line in (lm.stdout or "").splitlines():
+                        if "Users of" in line:
+                            info["licenses"].append(line.strip())
+                except Exception:
+                    pass
+            else:
+                info["error"] = f"Spectre command '{self._spectre_cmd}' not found locally"
+            return info
 
         runner = self._get_ssh_runner()
 
