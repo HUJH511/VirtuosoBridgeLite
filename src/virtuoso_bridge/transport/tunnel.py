@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 _TUNNEL_STARTUP_SETTLE_SECONDS = 1.0
 _STATE_DIR = Path.home() / ".cache" / "virtuoso_bridge"
+
+
+def _is_localhost(host: str) -> bool:
+    """Return True if *host* refers to the local machine."""
+    return host.strip().lower() in ("localhost", "127.0.0.1", "::1")
 
 
 def _state_file(profile: str | None = None) -> Path:
@@ -334,6 +341,47 @@ class SSHClient:
         self._remote_virtuoso_setup_path = remote_setup
         logger.info("Remote setup complete; setup script at %s (using %s)", remote_setup, python_cmd)
 
+    def ensure_local_setup(self) -> None:
+        """Generate virtuoso_setup.il locally (no SSH needed)."""
+        if self._remote_setup_done:
+            return
+
+        python_cmd = sys.executable
+        python_major = sys.version_info[0]
+
+        daemon_local = _find_ramic_bridge_daemon(python_major)
+        il_local = _find_ramic_bridge_il()
+
+        # Determine local work directory
+        if self._profile:
+            work_dir = _STATE_DIR / f"local_{self._profile}"
+        else:
+            work_dir = _STATE_DIR / "local"
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy daemon and IL files into the work directory
+        local_daemon = work_dir / daemon_local.name
+        local_il = work_dir / "ramic_bridge.il"
+        local_setup = work_dir / "virtuoso_setup.il"
+
+        shutil.copy2(daemon_local, local_daemon)
+
+        il_content = _prepare_ramic_bridge_il(il_local, self._port)
+        local_il.write_text(il_content, encoding="utf-8")
+
+        setup_content = _generate_virtuoso_setup_il(
+            str(local_daemon), str(local_il), python_cmd
+        )
+        local_setup.write_text(setup_content, encoding="utf-8")
+
+        self._remote_setup_done = True
+        self._remote_virtuoso_setup_path = str(local_setup)
+        self._remote_work_dir = str(work_dir)
+        logger.info(
+            "Local setup complete; setup script at %s (using %s)",
+            local_setup, python_cmd,
+        )
+
     # -- SSH tunnel (delegated to SSHRunner) ----------------------------------
 
     def ensure_tunnel(self) -> None:
@@ -385,6 +433,10 @@ class SSHClient:
 
     def warm(self, timeout: int = 15) -> None:
         """Full startup: remote setup + persistent shell + tunnel."""
+        if _is_localhost(self._remote_host):
+            self.ensure_local_setup()
+            self.save_state()
+            return
         self.ensure_remote_setup()
         if self._ssh_runner.persistent_shell_enabled:
             self._ssh_runner.ensure_persistent_shell(timeout=timeout)
@@ -393,6 +445,13 @@ class SSHClient:
 
     def stop(self) -> None:
         """Kill the tunnel and clean up."""
+        if _is_localhost(self._remote_host):
+            # Local mode: no tunnel or SSH to tear down — just clear state
+            sf = _state_file(self._profile)
+            if sf.exists():
+                sf.unlink(missing_ok=True)
+            return
+
         # Try state file PID first (may be from a previous session)
         if not self._ssh_runner.is_tunnel_alive:
             state = self.read_state(self._profile)
@@ -431,8 +490,10 @@ class SSHClient:
     def save_state(self) -> None:
         """Save tunnel state so other processes can find the port."""
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tunnel_pid = self._ssh_runner.tunnel_pid
+        is_local = _is_localhost(self._remote_host)
+        tunnel_pid = None if is_local else self._ssh_runner.tunnel_pid
         state = {
+            "mode": "local" if is_local else "remote",
             "port": self._port,
             "tunnel_pid": tunnel_pid,
             "remote_host": self._remote_host,
@@ -455,10 +516,16 @@ class SSHClient:
 
     @classmethod
     def is_running(cls, profile: str | None = None) -> bool:
-        """Check if a tunnel is running (port reachable or process alive)."""
+        """Check if a tunnel is running (port reachable or process alive).
+
+        For local mode, the state file existing is sufficient — the daemon
+        may not be loaded in CIW yet, so we skip port checks.
+        """
         state = cls.read_state(profile)
         if not state:
             return False
+        if state.get("mode") == "local":
+            return True
         port = state.get("port")
         pid = state.get("tunnel_pid")
         # Primary check: is the port reachable? (works on all platforms)
