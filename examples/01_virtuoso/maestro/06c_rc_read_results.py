@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Step 3: Read simulation results, export waveforms, open GUI.
+"""Step 3: Read simulation results, export waveforms.
 
 Prerequisite: run 06b_rc_simulate.py first.
+
+NOTE: maeOpenResults / maeGetOutputValue only work in GUI mode
+(deOpenCellView + maeMakeEditable). Background sessions return nil.
 """
 
 import sys
@@ -10,10 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.maestro import (
-    open_session, close_session, read_results, export_waveform,
-    open_maestro_gui_with_history,
-)
+from virtuoso_bridge.virtuoso.maestro import read_results, export_waveform
 
 LIB = "PLAYGROUND_LLM"
 CELL = "TB_RC_FILTER"
@@ -35,31 +35,51 @@ def main() -> int:
     client = VirtuosoClient.from_env()
     print(f"[info] {LIB}/{CELL}")
 
-    session = open_session(client, LIB, CELL)
+    # Must use GUI mode for reading results
+    client.execute_skill(
+        f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")')
+    client.execute_skill('maeMakeEditable()')
+
+    # Get session
+    r = client.execute_skill('''
+let((s) s = nil
+  foreach(x maeGetSessions() unless(s when(maeGetSetup(?session x) s = x)))
+  s)
+''')
+    session = (r.output or "").strip('"')
+    if not session or session == "nil":
+        print("No active session found.")
+        return 1
 
     # Scalar results
     print("\n=== Results ===")
-    results = read_results(client, session)
+    results = read_results(client, session, lib=LIB, cell=CELL)
     if results:
         for key, (expr, raw) in results.items():
             print(f"[{key}] {expr}")
             print(f"  {raw}")
     else:
         print("No results found.")
-        close_session(client, session)
-        return 1
 
     # Export waveforms
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Extract history name from yield result for export_waveform
+    yield_raw = results.get("maeGetOverallYield", ("", ""))[0]
+    import re
+    hm = re.search(r'Interactive\.\d+', yield_raw)
+    history = hm.group(0) if hm else ""
+
     print("\n=== Waveforms ===")
     mag_file = str(output_dir / "rc_ac_mag_db.txt")
-    export_waveform(client, session, 'dB20(mag(v("/OUT")))', mag_file, analysis="ac")
+    export_waveform(client, session, 'dB20(mag(v("/OUT")))', mag_file,
+                    analysis="ac", history=history)
     print(f"AC magnitude: {mag_file}")
 
     phase_file = str(output_dir / "rc_ac_phase.txt")
-    export_waveform(client, session, 'phase(v("/OUT"))', phase_file, analysis="ac")
+    export_waveform(client, session, 'phase(v("/OUT"))', phase_file,
+                    analysis="ac", history=history)
     print(f"AC phase: {phase_file}")
 
     # Quick comparison
@@ -81,13 +101,6 @@ def main() -> int:
                 print(f"  f_3dB = {f_3db:.3e} Hz")
                 break
 
-    # Open GUI (may fail if dialog pops up — not critical)
-    close_session(client, session)
-    try:
-        history = open_maestro_gui_with_history(client, LIB, CELL)
-        print(f"\nMaestro opened with {history}")
-    except Exception as e:
-        print(f"\nGUI open skipped: {e}")
     return 0
 
 

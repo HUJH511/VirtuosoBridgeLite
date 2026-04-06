@@ -120,28 +120,77 @@ def read_env(client: VirtuosoClient, session: str) -> dict[str, tuple[str, str]]
     return result
 
 
-def read_results(client: VirtuosoClient, session: str) -> dict[str, tuple[str, str]]:
+def read_results(client: VirtuosoClient, session: str,
+                  lib: str = "", cell: str = "") -> dict[str, tuple[str, str]]:
     """Read simulation results: output values, spec status, yield.
 
-    Finds the latest history automatically. Returns empty dict if no results.
-    Returns dict of (skill_expr, raw_output) tuples.
+    Requires GUI mode (deOpenCellView + maeMakeEditable).
+    Finds the latest valid history automatically by scanning Interactive.N.
+    Returns empty dict if no results.
+
+    Args:
+        session: active session string
+        lib: library name (auto-detected if empty)
+        cell: cell name (auto-detected if empty)
     """
     def q(label, expr):
         return _q(client, label, expr)
 
-    # Find latest history from asiGetResultsDir
-    history_expr = 'asiGetResultsDir(asiGetCurrentSession())'
-    _, results_dir = q("asiGetResultsDir", history_expr)
-    results_dir_str = results_dir.strip('"')
-    latest_history = ""
-    m = re.search(r'/maestro/results/maestro/(Interactive\.\d+)/', results_dir_str)
-    if m:
-        latest_history = m.group(1)
+    # Get lib/cell if not provided
+    if not lib or not cell:
+        test = _get_test(client, session)
+        if test:
+            if not lib:
+                r = client.execute_skill(
+                    f'maeGetEnvOption("{test}" ?option "lib" ?session "{session}")')
+                lib = (r.output or "").strip('"')
+            if not cell:
+                r = client.execute_skill(
+                    f'maeGetEnvOption("{test}" ?option "cell" ?session "{session}")')
+                cell = (r.output or "").strip('"')
 
-    if not latest_history or "tmpADE" in latest_history:
+    if not lib or not cell:
         return {}
 
-    # Open results
+    # Scan for latest valid history (highest Interactive.N with outputs)
+    test = _get_test(client, session)
+    find_expr = f'''
+let((libPath base files nums found)
+  libPath = ddGetObj("{lib}")~>readPath
+  base = strcat(libPath "/{cell}/maestro/results/maestro/")
+  files = getDirFiles(base)
+  nums = list()
+  foreach(f files
+    when(rexMatchp("Interactive" f)
+      let((n) n = cadr(parseString(f "."))
+        when(n nums = cons(atoi(n) nums))
+      )
+    )
+  )
+  nums = sort(setof(n nums n) lambda((a b) a > b))
+  found = nil
+  foreach(n nums
+    unless(found
+      let((h) h = sprintf(nil "Interactive.%d" n)
+        when(maeOpenResults(?history h)
+          when(maeGetResultOutputs(?testName "{test}")
+            found = h
+          )
+          maeCloseResults()
+        )
+      )
+    )
+  )
+  found
+)
+'''
+    _, latest_raw = q("findHistory", find_expr)
+    latest_history = latest_raw.strip('"')
+
+    if not latest_history or latest_history == "nil":
+        return {}
+
+    # Open the valid history
     open_expr = f'maeOpenResults(?history "{latest_history}")'
     _, opened = q("maeOpenResults", open_expr)
     if not opened or opened.strip('"') in ("nil", ""):
@@ -212,14 +261,21 @@ def export_waveform(
         ocnPrint(<expression> ?numberNotation 'scientific ?numSpaces 1 ?output "/tmp/...")
         maeCloseResults()
     """
-    # Auto-detect history name
+    # Auto-detect history name (same scan logic as read_results)
     if not history:
         r = client.execute_skill('asiGetResultsDir(asiGetCurrentSession())')
         rd = (r.output or "").strip('"')
-        m = re.search(r'/maestro/results/maestro/([^/]+)/', rd)
-        if not m:
-            raise RuntimeError("No simulation history found")
-        history = m.group(1)
+        m = re.search(r'/maestro/results/maestro/(Interactive\.\d+)/', rd)
+        if m:
+            history = m.group(1)
+        else:
+            raise RuntimeError(
+                "No simulation history found from asiGetResultsDir. "
+                "Pass history= explicitly, or ensure maestro GUI is open."
+            )
+            history = (r.output or "").strip('"')
+            if not history or history == "nil":
+                raise RuntimeError("No simulation history found")
 
     remote_path = f"/tmp/vb_wave_{history}.txt"
 
