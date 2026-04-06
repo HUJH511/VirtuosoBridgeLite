@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Step 2: Open GUI → simulate → wait → read results → export waveforms.
+"""Step 2: Simulate → wait → read results → export waveforms.
 
-One Maestro GUI window, open the whole time. No close/reopen.
+Reuses existing Maestro GUI if open, otherwise opens fresh.
+Can be run multiple times — each run starts a new simulation.
 
 Prerequisite: run 06a_rc_create.py first.
 """
@@ -34,40 +35,9 @@ def parse_wave_file(path: str) -> list[tuple[float, float]]:
     return pairs
 
 
-def main() -> int:
-    client = VirtuosoClient.from_env()
-    print(f"[info] {LIB}/{CELL}")
-    t_total = time.time()
-
-    # 1. Check if maestro already open with valid test — reuse it
-    r = client.execute_skill('''
-let((s) s = nil
-  foreach(x maeGetSessions() unless(s when(maeGetSetup(?session x) s = x)))
-  s)
-''')
-    existing = (r.output or "").strip('"')
-
-    if existing and existing != "nil":
-        print(f"[gui] Reusing existing session {existing}")
-    else:
-        # No valid session — open fresh
-        client.execute_skill(
-            f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")')
-        client.execute_skill('maeMakeEditable()')
-        print("[gui] Maestro opened")
-
-    # 3. Start simulation
-    t0 = time.time()
-    r = client.execute_skill('maeRunSimulation()')
-    run_name = (r.output or "").strip('"')
-    print(f"[sim] Started: {run_name}")
-
-    # 4. Wait via axlSessionConnect callback (fully non-blocking)
-    print("[sim] Waiting...")
-    wait_until_done(client, timeout=600)
-    print(f"[sim] Done ({time.time() - t0:.1f}s)")
-
-    # 5. Find session
+def ensure_gui(client: VirtuosoClient) -> None:
+    """Make sure maestro GUI is open and editable. Reuse if possible."""
+    # Check for existing valid session
     r = client.execute_skill('''
 let((s) s = nil
   foreach(x maeGetSessions() unless(s when(maeGetSetup(?session x) s = x)))
@@ -75,7 +45,71 @@ let((s) s = nil
 ''')
     session = (r.output or "").strip('"')
 
-    # 6. Read results
+    if session and session != "nil":
+        # Session exists — just save to keep it clean
+        save_setup(client, LIB, CELL)
+        return
+
+    # No valid session — open fresh
+    client.execute_skill(
+        f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")')
+    client.execute_skill('maeMakeEditable()')
+
+
+def main() -> int:
+    client = VirtuosoClient.from_env()
+    print(f"[info] {LIB}/{CELL}")
+    t_total = time.time()
+
+    # 1. Ensure GUI is open
+    ensure_gui(client)
+    print("[gui] Ready")
+
+    # 2. Run simulation
+    t0 = time.time()
+    r = client.execute_skill('maeRunSimulation()')
+    run_name = (r.output or "").strip('"')
+
+    if not run_name or run_name == "nil":
+        print("[sim] maeRunSimulation returned nil — session may be stale")
+        print("[sim] Closing and reopening...")
+        # Force close everything and retry
+        client.execute_skill(f'''
+foreach(s maeGetSessions()
+  errset(maeSaveSetup(?lib "{LIB}" ?cell "{CELL}" ?view "maestro" ?session s))
+  errset(maeCloseSession(?session s ?forceClose t)))
+foreach(win hiGetWindowList()
+  let((n) n = hiGetWindowName(win)
+    when(and(n rexMatchp("maestro" n))
+      errset(hiCloseWindow(win))
+      let((form) form = hiGetCurrentForm() when(form errset(hiFormCancel(form)))))))
+t
+''')
+        time.sleep(1)
+        client.execute_skill(
+            f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")')
+        client.execute_skill('maeMakeEditable()')
+        r = client.execute_skill('maeRunSimulation()')
+        run_name = (r.output or "").strip('"')
+        if not run_name or run_name == "nil":
+            print("[sim] Still failed. Check Virtuoso state.")
+            return 1
+
+    print(f"[sim] Started: {run_name} ({time.time() - t0:.1f}s)")
+
+    # 3. Wait (axlSessionConnect callback, non-blocking)
+    print("[sim] Waiting...")
+    wait_until_done(client, timeout=600)
+    print(f"[sim] Done ({time.time() - t0:.1f}s)")
+
+    # 4. Find session and read results
+    r = client.execute_skill('''
+let((s) s = nil
+  foreach(x maeGetSessions() unless(s when(maeGetSetup(?session x) s = x)))
+  s)
+''')
+    session = (r.output or "").strip('"')
+
     print("\n=== Results ===")
     results = read_results(client, session, lib=LIB, cell=CELL)
     if results:
@@ -83,7 +117,7 @@ let((s) s = nil
             print(f"[{key}] {expr}")
             print(f"  {raw}")
 
-    # 7. Export waveforms
+    # 5. Export waveforms
     yield_expr = results.get("maeGetOverallYield", ("", ""))[0]
     hm = re.search(r'Interactive\.\d+', yield_expr)
     history = hm.group(0) if hm else ""
@@ -120,7 +154,7 @@ let((s) s = nil
                     print(f"  f_3dB = {f_3db:.3e} Hz")
                     break
 
-        # 8. Restore history + save (GUI stays open)
+        # 6. Restore latest history in GUI + save
         client.execute_skill(f'maeRestoreHistory("{history}")')
         save_setup(client, LIB, CELL)
         print(f"\n[gui] Showing {history}")
