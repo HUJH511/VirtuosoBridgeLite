@@ -32,11 +32,18 @@ Control Cadence Virtuoso from anywhere, locally or remotely. Verified across mac
 - Persistent SSH tunnel stays alive across calls for high-frequency agent interactions
 - All commands logged for full traceability
 
-**3. Batteries included** — 30+ runnable examples, ready to use out of the box.
-- Layout: polygon, via, multi-layer routing, bus wiring, read-back geometry
-- Schematic: create circuits, read connectivity, import CDL via spiceIn, export Spectre netlist
-- ADE Assembler (Maestro): create tests, AC/tran analysis, parametric sweep, bandwidth spec, display results
-- Spectre: transient, DC+AC frequency response, PSS+Pnoise (StrongArm comparator), veriloga
+**3. Multi-server, multi-user** — One agent controls multiple Virtuoso instances simultaneously.
+- Multi-profile SSH: connect to N design servers from a single machine, each with independent tunnel
+- Run parallel simulations across servers to maximize throughput
+- Foundation for AI-driven analog design automation at scale
+
+**4. Full Maestro (ADE Assembler) automation** — Read, modify, simulate, and collect results programmatically.
+- Read existing simulation setups (analyses, outputs, variables, corners, environment)
+- Modify any configuration (tests, analyses, specs, model files, sweep parameters)
+- Run simulation with non-blocking completion detection (zero event loop blocking, LSCS parallel)
+- Collect scalar results, spec pass/fail, yield, and export waveform data
+
+**5. Batteries included** — Layout, schematic, Maestro, and Spectre examples ready to run.
 
 > **If you are an AI agent**, read [`AGENTS.md`](AGENTS.md) first and follow its setup checklist.
 
