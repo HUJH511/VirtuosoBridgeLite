@@ -21,7 +21,7 @@ Control Cadence Virtuoso from anywhere, locally or remotely. Verified across mac
 
 ### Why use this?
 
-**1. Full Virtuoso control** — Three levels of SKILL interaction, four design domains.
+**1. Rich Virtuoso integration** — Three levels of SKILL interaction, four design domains.
 - **Three ways to program**: load `.il` files, execute inline SKILL, or use Python APIs — your choice
 - **Schematic**: create circuits, wire instances, read connectivity, import CDL
 - **Layout**: shapes, vias, routing, read-back geometry, mosaic arrays
