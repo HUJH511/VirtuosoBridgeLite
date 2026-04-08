@@ -179,6 +179,52 @@ Load on demand — each contains detailed API docs and edge-case guidance:
 - `06b_rc_simulate.py` — run simulation
 - `06c_rc_read_results.py` — read results, export waveforms, open GUI
 
+## Common workflows
+
+### Read a design (schematic + maestro + netlist)
+
+```python
+from virtuoso_bridge import VirtuosoClient
+from virtuoso_bridge.virtuoso.maestro import read_config
+
+client = VirtuosoClient.from_env()
+LIB, CELL = "myLib", "myCell"
+
+# 1. Schematic — structured data via IL helper
+client.load_il("examples/01_virtuoso/assets/read_connectivity.il")
+r = client.execute_skill(f'ReadSchematic("{LIB}" "{CELL}")')
+# r.output is a SKILL list: (("lib" ...) ("instances" ...) ("nets" ...) ("pins" ...))
+
+# 2. Maestro — open GUI, read config, close
+client.open_window(LIB, CELL, view="schematic")  # must open schematic first
+r = client.execute_skill(f'''
+let((before after session)
+  before = maeGetSessions()
+  deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")
+  after = maeGetSessions()
+  session = nil
+  foreach(s after unless(member(s before) session = s))
+  session
+)
+''')
+session = (r.output or "").strip('"')
+config = read_config(client, session)           # dict of key → (skill_expr, raw)
+# close maestro window after reading
+
+# 3. Netlist — generate on remote, download via SSH
+test = client.execute_skill(f'car(maeGetSetup(?session "{session}"))').output.strip('"')
+client.execute_skill(
+    f'maeCreateNetlistForCorner("{test}" "Nominal" "/tmp/nl_{CELL}" ?session "{session}")')
+client.download_file(f"/tmp/nl_{CELL}/netlist/input.scs", "output/netlist.scs")
+```
+
+### Gotchas
+
+- **`csh()` returns `t`/`nil`**, not command output. Never use it to verify files. Use `download_file` (SSH/SCP) for all remote file operations.
+- **`procedurep()` returns `nil` for compiled functions** like `maeCreateNetlistForCorner`. The function still exists — test by calling it with wrong args instead.
+- **Netlist files are on the remote.** `maeCreateNetlistForCorner` writes to the remote filesystem. Always use `client.download_file()` to retrieve them.
+- **Design variables:** `maeGetSetup(?typeName "globalVar")` may return nil. Use `asiGetDesignVarList(asiGetCurrentSession())` instead.
+
 ## Related skills
 
 - **spectre** — standalone netlist-driven Spectre simulation (no Virtuoso GUI). Use when the user has a `.scs` netlist and wants to run it directly.

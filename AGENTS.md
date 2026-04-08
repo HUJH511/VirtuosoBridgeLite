@@ -213,6 +213,12 @@ If `spectre` is already on PATH in the remote user's default shell (e.g., via `~
 - Spectre simulation: `SpectreSimulator.from_env()`. See "How Spectre is located" above.
 - `core/` is for understanding the mechanism (3 files, 180 lines). Use the installed package for real work.
 
+## Common gotchas
+
+- **`csh()` returns `t`/`nil`**, not command output. Use `client.download_file()` (SSH/SCP) for remote file operations.
+- **`procedurep()` returns `nil` for compiled/built-in functions.** Don't use it to check if `mae*` functions exist.
+- **Remote files stay remote.** Functions like `maeCreateNetlistForCorner` write to the remote filesystem. Use `client.download_file()` to retrieve them.
+
 ## How to configure PDK paths
 
 Export a netlist from Virtuoso (**Simulation > Netlist > Create**). The `.scs` file contains everything:
