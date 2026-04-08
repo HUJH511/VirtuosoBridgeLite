@@ -279,7 +279,7 @@ class SSHClient:
 
     # -- remote deployment --------------------------------------------------
 
-    def _detect_remote_python(self) -> tuple[str, int]:
+    def _detect_remote_python(self) -> tuple[str, int, int]:
         detect_cmd = (
             'python3 --version 2>&1 && echo "CMD:python3" || '
             '(python --version 2>&1 && echo "CMD:python") || '
@@ -292,6 +292,7 @@ class SSHClient:
 
         python_cmd = None
         python_major = None
+        python_minor = 0
         for line in output.splitlines():
             line = line.strip()
             if line.startswith("CMD:"):
@@ -300,7 +301,9 @@ class SSHClient:
                     python_cmd = cmd
             elif line.startswith("Python "):
                 try:
-                    python_major = int(line.split()[1].split(".")[0])
+                    parts = line.split()[1].split(".")
+                    python_major = int(parts[0])
+                    python_minor = int(parts[1]) if len(parts) > 1 else 0
                 except (IndexError, ValueError):
                     pass
 
@@ -309,16 +312,18 @@ class SSHClient:
                 f"No Python interpreter found on {self._remote_host}. "
                 f"Detection output: {output!r}"
             )
-        logger.info("Detected remote Python: %s (major version %d)", python_cmd, python_major)
-        return python_cmd, python_major
+        logger.info("Detected remote Python: %s (version %d.%d)", python_cmd, python_major, python_minor)
+        return python_cmd, python_major, python_minor
 
     def ensure_remote_setup(self) -> None:
         """Upload daemon files and generate virtuoso_setup.il on the remote host."""
         if self._remote_setup_done:
             return
 
-        python_cmd, python_major = self._detect_remote_python()
-        daemon_local = _find_ramic_bridge_daemon(python_major)
+        python_cmd, python_major, python_minor = self._detect_remote_python()
+        daemon_local = _find_ramic_bridge_daemon(
+            3 if (python_major, python_minor) >= (3, 9) else 2
+        )
         il_local = _find_ramic_bridge_il()
         daemon_filename = daemon_local.name
 
