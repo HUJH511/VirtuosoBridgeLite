@@ -1,15 +1,19 @@
-"""Read schematic placement — instances, pins, labels, wires.
+"""Read schematic data — placement and electrical connectivity.
 
 Usage:
-    from virtuoso_bridge.virtuoso.schematic.reader import read_placement
+    from virtuoso_bridge.virtuoso.schematic.reader import read_placement, read_connectivity
 
     placement = read_placement(client, "myLib", "myCell")
-    placement = read_placement(client)  # from currently open schematic
+    connectivity = read_connectivity(client, "myLib", "myCell")
 """
 
 from __future__ import annotations
 
 from virtuoso_bridge import VirtuosoClient
+
+# ---------------------------------------------------------------------------
+# Placement: positions, orientations, pins, labels, wires
+# ---------------------------------------------------------------------------
 
 _READ_PLACEMENT_SKILL = '''
 let((cv instList pinList labelList wireList)
@@ -34,8 +38,24 @@ let((cv instList pinList labelList wireList)
 '''
 
 
-def _parse_placement(raw: str) -> dict:
-    """Parse the SKILL output into a structured dict."""
+def read_placement(
+    client: VirtuosoClient,
+    lib: str | None = None,
+    cell: str | None = None,
+) -> dict:
+    """Read placement: instance positions, pins, labels, wires.
+
+    Returns dict with keys: instances, pins, labels, wires.
+    """
+    if lib and cell:
+        cv_expr = f'dbOpenCellViewByType("{lib}" "{cell}" "schematic" "schematic" "r")'
+    else:
+        cv_expr = "geGetEditCellView()"
+
+    skill = _READ_PLACEMENT_SKILL.replace("{cv_expr}", cv_expr)
+    r = client.execute_skill(skill, timeout=30)
+    raw = (r.output or "").strip('"').replace("\\n", "\n").replace('\\"', '"')
+
     result: dict = {"instances": [], "pins": [], "labels": [], "wires": []}
     section = None
     for line in raw.splitlines():
@@ -64,22 +84,74 @@ def _parse_placement(raw: str) -> dict:
     return result
 
 
-def read_placement(
+# ---------------------------------------------------------------------------
+# Connectivity: instances, nets (with inst.term connections), pins
+# ---------------------------------------------------------------------------
+
+_READ_CONNECTIVITY_SKILL = '''
+let((cv instList netList pinList)
+  cv = {cv_expr}
+  unless(cv return("ERROR"))
+  instList = ""
+  foreach(inst cv~>instances
+    instList = strcat(instList sprintf(nil "%s|%s|%s\\n"
+      inst~>name inst~>libName inst~>cellName)))
+  netList = ""
+  foreach(net cv~>nets
+    netList = strcat(netList sprintf(nil "%s" net~>name))
+    foreach(it net~>instTerms
+      netList = strcat(netList sprintf(nil "|%s.%s" it~>inst~>name it~>name)))
+    netList = strcat(netList "\\n"))
+  pinList = ""
+  foreach(term cv~>terminals
+    pinList = strcat(pinList sprintf(nil "%s|%s\\n" term~>name term~>direction)))
+  sprintf(nil "INSTANCES\\n%sNETS\\n%sPINS\\n%sEND" instList netList pinList))
+'''
+
+
+def read_connectivity(
     client: VirtuosoClient,
     lib: str | None = None,
     cell: str | None = None,
 ) -> dict:
-    """Read all placement info from a schematic.
+    """Read electrical connectivity: instances, nets, pins.
 
-    If lib/cell provided, opens the cellview read-only.
-    If omitted, reads from the currently open schematic.
+    Returns dict with keys:
+        instances: [{"name", "lib", "cell"}, ...]
+        nets: [{"name", "connections": ["inst.term", ...]}, ...]
+        pins: [{"name", "direction"}, ...]
     """
     if lib and cell:
         cv_expr = f'dbOpenCellViewByType("{lib}" "{cell}" "schematic" "schematic" "r")'
     else:
         cv_expr = "geGetEditCellView()"
 
-    skill = _READ_PLACEMENT_SKILL.replace("{cv_expr}", cv_expr)
+    skill = _READ_CONNECTIVITY_SKILL.replace("{cv_expr}", cv_expr)
     r = client.execute_skill(skill, timeout=30)
     raw = (r.output or "").strip('"').replace("\\n", "\n").replace('\\"', '"')
-    return _parse_placement(raw)
+
+    result: dict = {"instances": [], "nets": [], "pins": []}
+    section = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if line in ("INSTANCES", "NETS", "PINS"):
+            section = line.lower()
+        elif line == "END" or not line:
+            continue
+        elif section == "instances":
+            parts = line.split("|")
+            if len(parts) >= 3:
+                result["instances"].append({
+                    "name": parts[0], "lib": parts[1], "cell": parts[2],
+                })
+        elif section == "nets":
+            parts = line.split("|")
+            result["nets"].append({
+                "name": parts[0],
+                "connections": parts[1:],
+            })
+        elif section == "pins":
+            parts = line.split("|")
+            if len(parts) >= 2:
+                result["pins"].append({"name": parts[0], "direction": parts[1]})
+    return result
