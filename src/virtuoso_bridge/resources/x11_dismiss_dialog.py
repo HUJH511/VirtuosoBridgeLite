@@ -118,10 +118,11 @@ def find_dialogs(display):
                 except (ValueError, IndexError):
                     pass
 
-        # Skip very large (main windows) or very tiny
-        if geo_w > 800 and geo_h > 600:
-            continue
+        # Skip very tiny windows
         if geo_w < 20 or geo_h < 20:
+            continue
+        # Skip windows too large to be dialogs (either dimension > 500)
+        if geo_w > 500 or geo_h > 500:
             continue
 
         candidates.append(win_id)
