@@ -487,7 +487,7 @@ class SSHRunner:
 
             tar_cmd = [self._tar_cmd, "cf", "-"]
             for local_path, _ in entries:
-                tar_cmd += ["-C", str(local_path.resolve().parent), local_path.name]
+                tar_cmd += ["-C", str(local_path.resolve().parent).replace("\\", "/"), local_path.name]
 
             logger.debug("Batch tar upload: %d file(s) -> %s:%s", len(entries), self._host, remote_dir)
             tar_proc = subprocess.Popen(
@@ -627,7 +627,7 @@ class SSHRunner:
         remote_cmd = f"sh -c {shlex.quote(inner_cmd)}"
 
         ssh_cmd = self._build_ssh_base() + [remote_cmd]
-        tar_cmd = [self._tar_cmd, "xzf", "-", "-C", str(local_path.parent)]
+        tar_cmd = [self._tar_cmd, "xzf", "-", "-C", str(local_path.parent).replace("\\", "/")]
 
         if self._verbose:
             print(f"[cmd] {' '.join(ssh_cmd)} | {' '.join(tar_cmd)}  # download {remote_path} -> {local_path}", flush=True)
@@ -686,7 +686,7 @@ class SSHRunner:
         remote_dir_q = shlex.quote(remote_dir)
         remote_cmd = f"mkdir -p {remote_dir_q} && tar xf - -C {remote_dir_q}"
         ssh_cmd = self._build_ssh_base() + [remote_cmd]
-        tar_cmd = [self._tar_cmd, "cf", "-", "-C", str(local_path.parent), local_path.name]
+        tar_cmd = [self._tar_cmd, "cf", "-", "-C", str(local_path.parent).replace("\\", "/"), local_path.name]
         if self._verbose:
             print(f"[cmd] {' '.join(tar_cmd)} | {' '.join(ssh_cmd)}  # upload {local_path} -> {remote_path}", flush=True)
         logger.debug("Uploading via tar pipe %s -> %s:%s", local_path, self._host, remote_path)
