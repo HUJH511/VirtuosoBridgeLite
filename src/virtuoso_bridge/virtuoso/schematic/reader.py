@@ -1,10 +1,13 @@
-"""Read schematic data — placement and electrical connectivity.
+"""Read schematic data — placement, connectivity, and instance parameters.
 
 Usage:
-    from virtuoso_bridge.virtuoso.schematic.reader import read_placement, read_connectivity
+    from virtuoso_bridge.virtuoso.schematic.reader import (
+        read_placement, read_connectivity, read_instance_params,
+    )
 
     placement = read_placement(client, "myLib", "myCell")
     connectivity = read_connectivity(client, "myLib", "myCell")
+    params = read_instance_params(client, "myLib", "myCell")
 """
 
 from __future__ import annotations
@@ -154,4 +157,71 @@ def read_connectivity(
             parts = line.split("|")
             if len(parts) >= 2:
                 result["pins"].append({"name": parts[0], "direction": parts[1]})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Instance parameters: CDF param name/value for each instance
+# ---------------------------------------------------------------------------
+
+_READ_PARAMS_SKILL = '''
+let((cv result)
+  cv = {cv_expr}
+  unless(cv return("ERROR"))
+  result = ""
+  foreach(inst cv~>instances
+    let((cdf paramStr)
+      cdf = cdfGetInstCDF(inst)
+      paramStr = ""
+      when(cdf
+        foreach(p cdf~>parameters
+          when(p~>value != nil && p~>value != ""
+            && strlen(sprintf(nil "%L" p~>value)) <= 120
+            paramStr = strcat(paramStr sprintf(nil "|%s=%L" p~>name p~>value)))))
+      result = strcat(result sprintf(nil "%s|%s|%s%s\\n"
+        inst~>name inst~>libName inst~>cellName paramStr))))
+  result)
+'''
+
+
+def read_instance_params(
+    client: VirtuosoClient,
+    lib: str | None = None,
+    cell: str | None = None,
+    filter_params: list[str] | None = None,
+) -> list[dict]:
+    """Read CDF parameters for all instances.
+
+    Returns list of dicts:
+        [{"name": "M0", "lib": "tsmcN28", "cell": "pch_mac",
+          "params": {"w": "500n", "l": "30n", "nf": "1", ...}}, ...]
+
+    Args:
+        filter_params: if provided, only include these param names (e.g. ["w", "l", "nf", "m"])
+    """
+    if lib and cell:
+        cv_expr = f'dbOpenCellViewByType("{lib}" "{cell}" "schematic" "schematic" "r")'
+    else:
+        cv_expr = "geGetEditCellView()"
+
+    skill = _READ_PARAMS_SKILL.replace("{cv_expr}", cv_expr)
+    r = client.execute_skill(skill, timeout=30)
+    raw = (r.output or "").strip('"').replace("\\n", "\n").replace('\\"', '"')
+
+    result = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        inst = {"name": parts[0], "lib": parts[1], "cell": parts[2], "params": {}}
+        for kv in parts[3:]:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                v = v.strip('"')  # remove SKILL %L quoting
+                if filter_params is None or k in filter_params:
+                    inst["params"][k] = v
+        result.append(inst)
     return result
