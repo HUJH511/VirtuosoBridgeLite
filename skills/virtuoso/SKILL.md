@@ -141,6 +141,8 @@ Load on demand — each contains detailed API docs and edge-case guidance:
 | `references/netlist.md` | CDL/Spectre netlist formats, spiceIn import |
 | `references/troubleshooting.md` | Known gotchas, GUI blocking, CDF quirks, connection issues |
 | `references/testbench-migration.md` | Migrate testbench + Maestro to another library (pitfalls, CDF param names) |
+| `references/schematic-recreation.md` | Recreate schematic from existing design (grid layout, diff pair conventions) |
+| `references/batch-netlist-si.md` | Generate netlists without Maestro using si batch translator |
 
 ## Examples
 
@@ -273,70 +275,6 @@ with client.schematic.edit(LIB, CELL) as sch:
   set_instance_params(client, "MP0", w="500n", l="30n", nf="4", m="2")
   ```
 
-### Recreate a schematic from an existing design
-
-Read an existing schematic, map to a grid, redraw cleanly with stubs. Useful for learning placement from reference designs or generating variants.
-
-**Step 1: Read the original** — extract instances, connectivity, and positions:
-
-```python
-from virtuoso_bridge.virtuoso.schematic.reader import read_placement
-
-client.open_window(LIB, CELL, view="schematic")
-placement = read_placement(client)
-
-# Also read connectivity for net names
-from virtuoso_bridge.virtuoso.schematic.reader import read_connectivity
-connectivity = read_connectivity(client, LIB, CELL)
-```
-
-**Step 2: Map to grid** — analyze relative positions, assign (col, row) on a uniform grid:
-
-- Sort instances by y → assign rows (vertical layers)
-- Sort by x within each row → assign columns
-- Identify differential pairs (same row, symmetric x) → left R0, right MY
-- Choose GRID spacing (1.5 works well for stub labels without collision)
-
-**Step 3: Redraw** — place on grid with stubs and pins:
-
-```python
-GRID = 1.5
-
-# Define placement as (name, cell, col, row, orient)
-INSTANCES = [
-    ("M_TAIL", "nch_ulvt_mac", 1.5, 0, "R0"),   # centered
-    ("M_INP",  "nch_ulvt_mac", 1,   1, "R0"),    # left of pair
-    ("M_INN",  "nch_ulvt_mac", 2,   1, "MY"),    # right, mirrored
-    ...
-]
-
-# Define connectivity as (name, drain, gate, source, body)
-LABELS = [
-    ("M_TAIL", "VS",  "CLK",  "GND", "GND"),
-    ("M_INP",  "VN1", "VINP", "VS",  "GND"),
-    ...
-]
-
-with client.schematic.edit(LIB, CELL) as sch:
-    for name, cell, col, row, orient in INSTANCES:
-        sch.add(inst(PDK, cell, "symbol", name, col * GRID, row * GRID, orient))
-    for name, d, g, s, b in LABELS:
-        sch.add_net_label_to_transistor(name,
-            drain_net=d, gate_net=g, source_net=s, body_net=b)
-    # Pins in leftmost column
-    sch.add(pin("VINP", -1 * GRID, 1 * GRID, "R0", direction="input"))
-    ...
-```
-
-**Key rules:**
-- **Grid spacing 1.5** — enough room for stubs without collision. Too small (< 1.0) causes overlap, too large (> 2.0) wastes space.
-- **Differential pairs: R0/MY** — left device `R0`, right device `MY`, same row, symmetric columns.
-- **Vertical layering** — NMOS at bottom (low rows), PMOS at top (high rows). Within a stage: current sources → signal path → loads.
-- **Pins in a dedicated column** — always to the left of all transistors (e.g. col = -1).
-- **Output stages offset right** — place at col 5–6, separate from core.
-- **No wires** — only `add_net_label_to_transistor`. Same net name = same net.
-- **Verify with CIW screenshot** — check for PARSER WARNING or schCheck errors after every run.
-
 ### Read a design (schematic + maestro + netlist)
 
 **Always use the Python API functions below. Do NOT hand-write SKILL for reading.**
@@ -461,119 +399,6 @@ client.dismiss_dialog()
 Uses `xwininfo` to find virtuoso-owned dialog windows and `XTestFakeKeyEvent` to send Enter. Works even when the SKILL channel is completely stuck.
 
 **Prevention:** Always `dbSave(cv)` before `hiCloseWindow(win)`. Never use `?waitUntilDone t` in simulation calls. Add dialog-recovery in simulation loops (see "Run a simulation" section).
-
-### Gotchas
-
-See `references/troubleshooting.md` for a searchable list of known pitfalls (GUI dialog blocking, CDF vs `inst~>prop`, `csh()` return values, Maestro variable quirks, connection issues, etc.). When something fails unexpectedly, search that file by keyword before debugging from scratch.
-
-### axl* API — variable management
-
-The `axl*` functions operate on the Maestro setup database directly. Useful for deleting test-level variables that `maeDeleteVar` cannot reach.
-
-```scheme
-; Get the setup database handle
-axlGetMainSetupDB("fnxSession1")         ; => 7918 (integer handle)
-
-; Get a test handle
-axlGetTest(axlGetMainSetupDB("fnxSession1") "IB_PSS")   ; => 7936
-
-; Get a variable element from a test
-axlGetVar(axlGetTest(axlGetMainSetupDB("fnxSession1") "IB_PSS") "f")  ; => 7958
-
-; Delete a test-level variable
-axlRemoveElement(axlGetVar(axlGetTest(axlGetMainSetupDB("fnxSession1") "IB_PSS") "f"))
-; => t
-
-; Delete a global variable
-axlRemoveElement(axlGetVar(axlGetMainSetupDB("fnxSession1") "f"))
-```
-
-**Note:** To delete a global variable, you must first delete it from all tests that have a local copy. Use `axlGetTest` + `axlGetVar` + `axlRemoveElement` per test, then delete the global one.
-
-## Batch Netlist (si)
-
-Generate Spectre/HSPICE netlists without Maestro, using the `si` batch translator. Useful for automation and CI pipelines.
-
-### Generate si.env from CIW
-
-Don't write `si.env` manually — let Virtuoso generate it:
-
-```python
-# Generate si.env on remote
-client.execute_skill('sh("mkdir -p /tmp/si_run")')
-client.execute_skill(
-    'simInitEnvWithArgs("/tmp/si_run" "myLib" "myCell" "schematic" "spectre" nil)')
-
-# Download to inspect or modify
-client.download_file("/tmp/si_run/si.env", "output/si.env")
-```
-
-`simInitEnvWithArgs(runDir libName cellName viewName simulator nil)` — the last arg is unused, pass nil.
-
-### si.env fields
-
-| Field | Meaning | Example |
-|-------|---------|---------|
-| `simLibName` | Library name | `"2025_FIA"` |
-| `simCellName` | Cell name | `"_TB_INPUT_BUFFER_CASCODE_PSS"` |
-| `simViewName` | View | `"schematic"` |
-| `simSimulator` | Simulator type | `"spectre"` or `"hspice"` |
-| `simViewList` | View search order for netlisting | `'("spectre cmos_sch schematic veriloga")` |
-| `simStopList` | Stop descending at these views | `'("spectre")` |
-| `simNetlistHier` | Hierarchical netlist | `t` |
-| `nlDesignVarNameList` | Design variables to include | `'("VDD" "CL" "f")` |
-
-### Run si batch netlist
-
-```python
-# Run si on remote via bridge (csh syntax — use ; not &&)
-client.run_shell_command(
-    'mkdir -p /tmp/si_run ; '
-    'cp /path/to/si.env /tmp/si_run/ ; '
-    'cd /tmp/si_run ; '
-    'si -batch -cdslib /home/zhangz/tsmc28/RISCA/cds.lib -command nl')
-
-# Download the netlist
-client.download_file("/tmp/si_run/netlist", "output/si_netlist.scs")
-```
-
-- For Spectre: use `-command nl` (NOT `netlist` — that causes OSSHNL-510 errors)
-- For HSPICE/auCdl/Verilog: use `-command netlist`
-- `-cdslib` can be omitted if `cds.lib` exists in home directory
-- `cds.lib` path can be found via: `client.execute_skill('simplifyFilename("./cds.lib")')`
-- `run_shell_command` uses csh — returns `t`/`nil`, not stdout. Don't rely on output.
-
-Output file: `<runDir>/netlist` (a single file, not a directory).
-
-### si vs Maestro netlist
-
-| | si netlist | Maestro netlist (`maeCreateNetlistForCorner`) |
-|---|---|---|
-| **Circuit structure** | Yes | Yes (identical) |
-| **parameters line** | No (variables stay symbolic) | Yes (resolved to values) |
-| **model include** | No | Yes |
-| **Simulation commands** | No | Yes (analysis, options) |
-| **Requires Maestro** | No | Yes (open session) |
-
-si gives a pure circuit netlist. Maestro gives a ready-to-run simulation deck.
-
-### View netlist in Virtuoso GUI
-
-```scheme
-view("/tmp/si_run/netlist")
-```
-
-### From Maestro (alternative)
-
-If a Maestro session is open, `maeCreateNetlistForCorner` is simpler:
-
-```scheme
-maeCreateNetlistForCorner("IB_PSS" "Nominal" "/tmp/netlist_dir")
-; Output: /tmp/netlist_dir/netlist/input.scs
-
-; View in GUI
-view("/tmp/netlist_dir/netlist/input.scs")
-```
 
 ## Related skills
 

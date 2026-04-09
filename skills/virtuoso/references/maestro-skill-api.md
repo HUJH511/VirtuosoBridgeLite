@@ -546,6 +546,30 @@ client.download_file('/tmp/results.csv', 'output/results.csv')
 - `examples/01_virtuoso/maestro/06b_rc_simulate.py` — run simulation
 - `examples/01_virtuoso/maestro/06c_rc_read_results.py` — read results, export waveforms, open GUI
 
+## axl* API -- variable management
+
+The `axl*` functions operate on the Maestro setup database directly. Useful for deleting test-level variables that `maeDeleteVar` cannot reach.
+
+```scheme
+; Get the setup database handle
+axlGetMainSetupDB("fnxSession1")         ; => 7918 (integer handle)
+
+; Get a test handle
+axlGetTest(axlGetMainSetupDB("fnxSession1") "IB_PSS")   ; => 7936
+
+; Get a variable element from a test
+axlGetVar(axlGetTest(axlGetMainSetupDB("fnxSession1") "IB_PSS") "f")  ; => 7958
+
+; Delete a test-level variable
+axlRemoveElement(axlGetVar(axlGetTest(axlGetMainSetupDB("fnxSession1") "IB_PSS") "f"))
+; => t
+
+; Delete a global variable
+axlRemoveElement(axlGetVar(axlGetMainSetupDB("fnxSession1") "f"))
+```
+
+**Note:** To delete a global variable, you must first delete it from all tests that have a local copy. Use `axlGetTest` + `axlGetVar` + `axlRemoveElement` per test, then delete the global one.
+
 ## See also
 
-- `references/maestro-python-api.md` — Python API reference (session, reader, writer)
+- `references/maestro-python-api.md` -- Python API reference (session, reader, writer)
