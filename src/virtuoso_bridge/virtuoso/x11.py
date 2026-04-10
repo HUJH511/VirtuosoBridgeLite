@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,13 @@ def dismiss_dialogs(
     """
     script = _ensure_helper(runner, user)
     resolved = _get_display(display)
-    cmd = f"python2 {script} --dismiss"
+    env_prefix = ""
+    for key in ("VB_SAVE_DIALOG_POLICY", "VB_SAVE_DIALOG_CONTEXT"):
+        val = os.getenv(key)
+        if val is not None and val != "":
+            env_prefix += f"{key}={shlex.quote(val)} "
+
+    cmd = f"{env_prefix}python2 {script} --dismiss"
     if resolved:
         cmd += f" {resolved}"
     result = runner.run_command(cmd, timeout=15)
