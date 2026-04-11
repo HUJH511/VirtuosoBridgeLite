@@ -1,7 +1,7 @@
 """X11 dialog detection and dismissal via SSH (bypasses SKILL channel).
 
 When a modal dialog blocks the Virtuoso CIW event loop, all execute_skill()
-calls time out.  This module uses direct SSH + remote Python2/Xlib to find
+calls time out.  This module uses direct SSH + remote Python3/Xlib to find
 and dismiss those dialogs without touching the SKILL channel.
 """
 
@@ -48,7 +48,7 @@ def find_dialogs(
     """
     script = _ensure_helper(runner, user)
     resolved = _get_display(display)
-    cmd = f"python2 {script}"
+    cmd = f"python3 {script}"
     if resolved:
         cmd += f" {resolved}"
     result = runner.run_command(cmd, timeout=15)
@@ -72,7 +72,7 @@ def dismiss_dialogs(
         if val is not None and val != "":
             env_prefix += f"{key}={shlex.quote(val)} "
 
-    cmd = f"{env_prefix}python2 {script} --dismiss"
+    cmd = f"{env_prefix}python3 {script} --dismiss"
     if resolved:
         cmd += f" {resolved}"
     result = runner.run_command(cmd, timeout=15)

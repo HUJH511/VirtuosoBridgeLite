@@ -354,9 +354,20 @@ def dismiss_window(display, win_id_str, title="", x=0, y=0, w=0, h=0):
                     "keycode_esc": int(kc_esc),
                 }
         except Exception:
-            # Fallback to keyboard mnemonic if click path fails.
-            keysym = 0x006e  # XK_n
-            action = "no"
+            # Fallback: send bare 'n' key and return immediately.
+            keysym_n = 0x006e  # XK_n
+            kc_n = xlib.XKeysymToKeycode(dpy, keysym_n)
+            xtst.XTestFakeKeyEvent(dpy, kc_n, True, 0)
+            xtst.XTestFakeKeyEvent(dpy, kc_n, False, 0)
+            xlib.XFlush(dpy)
+            xlib.XCloseDisplay(dpy)
+            return {
+                "dismissed": win_id_str,
+                "child": child_id_str,
+                "keycode": int(kc_n),
+                "action": "no_fallback",
+                "title": title,
+            }
     else:
         keysym = 0xff0d  # XK_Return
         action = "enter"
