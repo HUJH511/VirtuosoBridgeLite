@@ -147,6 +147,7 @@ Load on demand — each contains detailed API docs and edge-case guidance:
 | `references/layout-python-api.md` | LayoutEditor, LayoutOps, shape/via/instance creation |
 | `references/maestro-skill-api.md` | mae* SKILL functions, OCEAN, corners, known blockers |
 | `references/maestro-python-api.md` | Session, read_config (verbose 0/1/2), writer functions |
+| `references/simulation-flow.md` | **Standard simulation flow** — 8-step guide, pitfalls, optimization loops |
 | `references/netlist.md` | CDL/Spectre netlist formats, spiceIn import |
 | `references/troubleshooting.md` | Known gotchas, GUI blocking, CDF quirks, connection issues |
 | `references/testbench-migration.md` | Migrate testbench + Maestro to another library (pitfalls, CDF param names) |
