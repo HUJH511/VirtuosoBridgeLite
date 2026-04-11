@@ -230,9 +230,36 @@ def open_gui_session(client: VirtuosoClient, lib: str, cell: str) -> str:
     if r.errors or not r.output or r.output.strip() in ("nil", ""):
         raise RuntimeError(f"deOpenCellView failed for {lib}/{cell}/maestro: {r.errors}")
 
-    r = client.execute_skill('maeMakeEditable()')
-    if r.errors:
-        raise RuntimeError(f"maeMakeEditable failed: {r.errors}")
+    # Step 4: make editable — with X11 dismiss protection.
+    # If a previous session's edit lock hasn't fully released,
+    # maeMakeEditable pops ASSEMBLER-8127 which blocks SKILL.
+    # We start a dismiss thread that sends Enter (closes the error
+    # dialog) and retry after a short wait.
+    import threading
+    import time as _time
+
+    runner = client.ssh_runner
+    for attempt in range(3):
+        dismiss_thread = None
+        if runner is not None:
+            def _dismiss_8127():
+                _time.sleep(1.0)
+                _send_x11_key(runner, 0xff0d)  # Enter = Close on 8127 dialog
+
+            dismiss_thread = threading.Thread(target=_dismiss_8127, daemon=True)
+            dismiss_thread.start()
+
+        r = client.execute_skill('maeMakeEditable()', timeout=15)
+
+        if dismiss_thread is not None:
+            dismiss_thread.join(timeout=5)
+
+        if not r.errors:
+            break
+        logger.warning("maeMakeEditable attempt %d failed: %s", attempt + 1, r.errors)
+        _time.sleep(1.0)
+    else:
+        raise RuntimeError(f"maeMakeEditable failed after 3 attempts: {r.errors}")
 
     # Find the new session
     session = find_open_session(client)
