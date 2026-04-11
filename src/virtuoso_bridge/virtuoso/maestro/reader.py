@@ -251,6 +251,7 @@ let((tests info)
     result["maeGetOverallYield"] = q("maeGetOverallYield", expr)
 
     client.execute_skill('maeCloseResults()')
+    client.execute_skill('errset(maeMakeEditable())')
 
     return result
 
@@ -305,6 +306,7 @@ def export_waveform(
     r = client.execute_skill('asiGetResultsDir(asiGetCurrentSession())')
     results_dir = (r.output or "").strip('"')
     client.execute_skill('maeCloseResults()')
+    client.execute_skill('errset(maeMakeEditable())')
 
     if not results_dir or results_dir == "nil" or "tmpADE" in results_dir:
         raise RuntimeError(f"No valid results directory for {history}")
