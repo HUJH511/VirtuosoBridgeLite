@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from virtuoso_bridge.env import load_vb_env
 from virtuoso_bridge.models import ExecutionStatus, SimulationResult
 from virtuoso_bridge.spectre.parsers import parse_psf_ascii_directory
 from virtuoso_bridge.transport.tunnel import _is_localhost
@@ -94,6 +95,7 @@ def cancel_job(job_id: str) -> str:
     Reads the job record to find the remote host, then SSH-kills the
     Spectre process using the PID file written at launch.
     """
+    load_vb_env()
     path = _job_path(job_id)
     if not path.exists():
         return f"Job {job_id} not found"
@@ -602,6 +604,7 @@ class SpectreSimulator:
         ssh_runner: SSHRunner | None = None,
         profile: str | None = None,
     ) -> None:
+        load_vb_env()
         self._spectre_cmd = spectre_cmd
         self._spectre_args = list(spectre_args or [])
         self._timeout = timeout
@@ -656,6 +659,7 @@ class SpectreSimulator:
         ControlMaster).  Raises RuntimeError if no remote connection is
         available.
         """
+        load_vb_env()
         # Check if we should run locally
         suffix = f"_{profile}" if profile else ""
         remote_host = os.environ.get(f"VB_REMOTE_HOST{suffix}", "") or os.environ.get("VB_REMOTE_HOST", "")
