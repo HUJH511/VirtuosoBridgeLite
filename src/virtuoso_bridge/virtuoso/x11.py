@@ -14,6 +14,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from virtuoso_bridge.env import load_vb_env
 from virtuoso_bridge.transport.ssh import SSHRunner
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ _HELPER_SCRIPT = Path(__file__).parent.parent / "resources" / "x11_dismiss_dialo
 
 def _get_display(display: str | None) -> str | None:
     """Resolve display: explicit arg > VB_DISPLAY env var > auto-detect (None)."""
+    load_vb_env()
     if display:
         return display
     return os.getenv("VB_DISPLAY") or None
@@ -60,6 +62,7 @@ def find_dialogs(
 
     Returns list of dicts: [{"window_id", "title", "x", "y", "w", "h"}, ...]
     """
+    load_vb_env()
     script = _ensure_helper(runner, user)
     py = _detect_remote_python(runner)
     resolved = _get_display(display)
@@ -79,6 +82,7 @@ def dismiss_dialogs(
 
     Returns list of result dicts (found dialogs + dismissal results).
     """
+    load_vb_env()
     script = _ensure_helper(runner, user)
     py = _detect_remote_python(runner)
     resolved = _get_display(display)
