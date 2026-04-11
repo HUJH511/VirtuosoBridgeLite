@@ -75,14 +75,33 @@ def _send_x11_alt_n(runner) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cellview memory management
+# ---------------------------------------------------------------------------
+
+def _purge_maestro_cellviews(client: VirtuosoClient) -> None:
+    """Purge all maestro cellviews from Virtuoso's virtual memory.
+
+    After hiCloseWindow + maeCloseSession, the cellview may still be
+    cached in memory with an internal edit lock. dbPurge forces it out,
+    allowing another cell to be opened in edit mode.
+    """
+    client.execute_skill('''
+foreach(cv dbGetOpenCellViews()
+  when(cv~>viewName == "maestro"
+    errset(dbPurge(cv))))
+''', timeout=10)
+
+
+# ---------------------------------------------------------------------------
 # Session state detection
 # ---------------------------------------------------------------------------
 
 def _get_session_windows(client: VirtuosoClient) -> list[dict]:
-    """Get all maestro windows with their session and state.
+    """Get all ADE windows (Assembler and Explorer) with their session and state.
 
     Returns list of dicts with keys:
-        session, window_num, mode ("editing"/"reading"), modified (bool)
+        session, window_num, mode ("editing"/"reading"), modified (bool),
+        ade_type ("assembler"/"explorer"), title
     """
     r = client.execute_skill('''
 let((result)
@@ -103,7 +122,11 @@ let((result)
     # Parse: (("session" num "title") ...)
     for m in re.finditer(r'\("([^"]+)"\s+(\d+)\s+"([^"]+)"\)', raw):
         session, wnum, title = m.group(1), int(m.group(2)), m.group(3)
-        if "Assembler" not in title:
+        if "Assembler" in title:
+            ade_type = "assembler"
+        elif "Explorer" in title:
+            ade_type = "explorer"
+        else:
             continue
         mode = "editing" if "Editing:" in title else "reading"
         modified = title.rstrip().endswith("*")
@@ -112,6 +135,7 @@ let((result)
             "window_num": wnum,
             "mode": mode,
             "modified": modified,
+            "ade_type": ade_type,
             "title": title,
         })
     return results
@@ -223,43 +247,17 @@ def open_gui_session(client: VirtuosoClient, lib: str, cell: str) -> str:
         logger.info("Closing session %s (%s, target=%s)", w["session"], w["mode"], is_target)
         close_gui_session(client, w["session"], save=(w["mode"] == "editing"))
 
-    # Step 3: open fresh
-    logger.info("Opening GUI: %s/%s/maestro", lib, cell)
+    # Step 3: open in editable mode.
+    # deOpenCellView with mode "a" opens editable. From a clean state
+    # (no residual sessions), this opens Assembler by default.
+    # Do NOT call maeOpenSetup afterwards — it creates a second
+    # background session with its own lock, causing 8127 on next open.
+    logger.info("Opening GUI (editable): %s/%s/maestro", lib, cell)
     r = client.execute_skill(
-        f'deOpenCellView("{lib}" "{cell}" "maestro" "maestro" nil "r")')
+        f'deOpenCellView("{lib}" "{cell}" "maestro" "maestro" nil "a")',
+        timeout=10)
     if r.errors or not r.output or r.output.strip() in ("nil", ""):
         raise RuntimeError(f"deOpenCellView failed for {lib}/{cell}/maestro: {r.errors}")
-
-    # Step 4: make editable — with X11 dismiss protection.
-    # If a previous session's edit lock hasn't fully released,
-    # maeMakeEditable pops ASSEMBLER-8127 which blocks SKILL.
-    # We start a dismiss thread that sends Enter (closes the error
-    # dialog) and retry after a short wait.
-    import threading
-    import time as _time
-
-    runner = client.ssh_runner
-    for attempt in range(3):
-        dismiss_thread = None
-        if runner is not None:
-            def _dismiss_8127():
-                _time.sleep(1.0)
-                _send_x11_key(runner, 0xff0d)  # Enter = Close on 8127 dialog
-
-            dismiss_thread = threading.Thread(target=_dismiss_8127, daemon=True)
-            dismiss_thread.start()
-
-        r = client.execute_skill('maeMakeEditable()', timeout=15)
-
-        if dismiss_thread is not None:
-            dismiss_thread.join(timeout=5)
-
-        if not r.errors:
-            break
-        logger.warning("maeMakeEditable attempt %d failed: %s", attempt + 1, r.errors)
-        _time.sleep(1.0)
-    else:
-        raise RuntimeError(f"maeMakeEditable failed after 3 attempts: {r.errors}")
 
     # Find the new session
     session = find_open_session(client)
@@ -323,6 +321,11 @@ def close_gui_session(client: VirtuosoClient, session: str,
                 logger.info("Reading* session %s has conflicts, discarding changes", session)
 
     _close_gui_window(client, target_window, windows)
+
+    # Purge cellview from memory to release internal edit lock.
+    # Without this, deOpenCellView("a") on another cell may fail with
+    # ASSEMBLER-8127 even after hiCloseWindow + maeCloseSession.
+    _purge_maestro_cellviews(client)
     logger.info("Closed GUI session: %s", session)
 
 
