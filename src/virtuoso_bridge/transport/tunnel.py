@@ -71,14 +71,6 @@ def _find_ramic_bridge_daemon(python_major: int) -> Path:
     raise FileNotFoundError(f"Cannot locate {filename} in virtuoso_bridge.virtuoso.basic.resources.")
 
 
-def _prepare_ramic_bridge_il(il_path: Path, port: int) -> str:
-    content = il_path.read_text(encoding="utf-8")
-    pattern = r"(RBPort\s*=\s*)\d+(\s*(;.*)?)$"
-    def replace_port(match: re.Match[str]) -> str:
-        comment = match.group(2) if match.group(2) else "  ; TCP port for client connections"
-        return f"{match.group(1)}{port}{comment}"
-    return re.sub(pattern, replace_port, content, flags=re.MULTILINE)
-
 
 def _generate_virtuoso_setup_il(daemon_path: str, il_path: str, python_cmd: str = "python", port: int = 65432) -> str:
     return (
@@ -327,7 +319,7 @@ class SSHClient:
             raise RuntimeError(f"Failed to upload daemon: {up.stderr.strip()}")
 
         logger.info("Uploading IL script to %s", remote_il)
-        il_content = _prepare_ramic_bridge_il(il_local, self._port)
+        il_content = il_local.read_text(encoding="utf-8")
         up = self._ssh_runner.upload_text(il_content, remote_il)
         if up.returncode != 0:
             raise RuntimeError(f"Failed to upload IL script: {up.stderr.strip()}")
@@ -367,7 +359,7 @@ class SSHClient:
 
         shutil.copy2(daemon_local, local_daemon)
 
-        il_content = _prepare_ramic_bridge_il(il_local, self._port)
+        il_content = il_local.read_text(encoding="utf-8")
         local_il.write_text(il_content, encoding="utf-8")
 
         setup_content = _generate_virtuoso_setup_il(
