@@ -10,35 +10,30 @@ Complete flow from opening Maestro to reading results. Follow this order exactly
 from virtuoso_bridge import VirtuosoClient, decode_skill_output
 from virtuoso_bridge.virtuoso.maestro import (
     read_config, read_results, save_setup, run_and_wait,
+    open_gui_session, close_gui_session, purge_maestro_cellviews,
 )
 
 client = VirtuosoClient.from_env()
 LIB, CELL = "myLib", "myTestbench"
 
-# ── Step 1: Clean up stale sessions ──────────────────────────────
-# Background sessions leave .cdslck files that block GUI opening.
-# Always clean up first.
-client.execute_skill('''
-foreach(s maeGetSessions() maeCloseSession(?session s ?forceClose t))
-''')
+# ── Step 0: Purge stale cellviews from memory ────────────────────
+# Prevents ASSEMBLER-8127 caused by internal edit locks from
+# previously closed sessions.
+purge_maestro_cellviews(client)
 
-# ── Step 2: Open maestro in GUI mode ─────────────────────────────
-client.execute_skill(
-    f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "r")')
+# ── Step 1: Open maestro (handles cleanup automatically) ─────────
+# open_gui_session cleans background sessions, closes other cells'
+# windows, and opens in editable mode.
+session = open_gui_session(client, LIB, CELL)
 
-# ── Step 3: Switch to editable mode ──────────────────────────────
-# CAUTION: fails with ASSEMBLER-8127 dialog if another session
-# already has this cellview in edit mode. See troubleshooting.md.
-client.execute_skill('maeMakeEditable()')
+# Or manually (if you need more control):
+# client.execute_skill('foreach(s maeGetSessions() errset(maeCloseSession(?session s ?forceClose t)))')
+# client.execute_skill(f'deOpenCellView("{LIB}" "{CELL}" "maestro" "maestro" nil "a")')
 
-# ── Step 4: Find session name ────────────────────────────────────
-session = decode_skill_output(
-    client.execute_skill('car(maeGetSessions())').output)
-
-# ── Step 5: (Optional) Modify variables, outputs, etc. ──────────
+# ── Step 2: (Optional) Modify variables, outputs, etc. ──────────
 # client.execute_skill(f'maeSetVar("CL" "1p" ?session "{session}")')
 
-# ── Step 6: Save + run + wait ────────────────────────────────────
+# ── Step 3: Save + run + wait ────────────────────────────────────
 # save_setup persists changes; run_and_wait starts the simulation
 # with a completion callback and polls via SSH.
 # SKILL channel stays free during the wait.
@@ -47,12 +42,12 @@ history, status = run_and_wait(client, session=session, timeout=600)
 history = history.strip('"')
 print(f"Simulation {status}: {history}")
 
-# ── Step 7: Read results ─────────────────────────────────────────
+# ── Step 4: Read results ─────────────────────────────────────────
 results = read_results(client, session, lib=LIB, cell=CELL, history=history)
 for key, (expr, raw) in results.items():
     print(f"  {key}: {decode_skill_output(raw)[:200]}")
 
-# ── Step 8: (Optional) Export waveforms ──────────────────────────
+# ── Step 5: (Optional) Export waveforms ──────────────────────────
 # from virtuoso_bridge.virtuoso.maestro import export_waveform
 # export_waveform(client, session, 'VT("/VOUT")', "output/vout.txt",
 #                 analysis="tran", history=history)
@@ -158,14 +153,13 @@ foreach(s maeGetSessions() maeCloseSession(?session s ?forceClose t))
 
 | Pitfall | Symptom | Fix |
 |---------|---------|-----|
-| Skipping step 1 | `deOpenCellView` returns nil/error | `maeCloseSession(?forceClose t)` on all stale sessions |
-| Skipping step 3 | `maeRunSimulation` returns error | Must `maeMakeEditable()` after `deOpenCellView` |
-| Using `open_session` for simulation | `wait_until_done` returns immediately | Use GUI mode (steps 2-3), not background |
+| Not purging before open | ASSEMBLER-8127 from stale internal lock | `purge_maestro_cellviews(client)` before `open_gui_session` |
+| Using `open_session` for simulation | `wait_until_done` returns immediately | Use `open_gui_session` (GUI mode), not `open_session` (background) |
 | Skipping `save_setup` | Simulation uses stale parameters | Always save before running |
-| Calling `maeMakeEditable` when another session has edit lock | ASSEMBLER-8127 dialog deadlocks SKILL channel | Check window title first; close the other session or work in it |
-| `maeCloseResults` leaves Maestro read-only | Next `maeRunSimulation` fails | Re-run `maeMakeEditable()` (check for edit lock first) |
-| `maeCloseSession` on GUI-opened session | ASSEMBLER-8051: "opened from UI" | Close via `hiCloseWindow` instead |
+| `maeCloseResults` leaves Maestro read-only | Next `maeRunSimulation` fails | Use `open_gui_session` to re-establish editable mode |
+| `maeCloseSession` on GUI-opened session | ASSEMBLER-8051: "opened from UI" | Use `close_gui_session` instead |
 | `window:N` in multi-line SKILL | `unbound variable - window` | Use `foreach(w hiGetWindowList() ...)` to find windows by `w~>windowNum` |
+| `read_results` returns empty | Outputs not in "saved outputs" list | Use `maeGetOutputValue` directly (see "Reading outputs manually" below) |
 
 ## Optimization loops
 
@@ -182,3 +176,27 @@ for val in ["1p", "2p", "5p", "10p"]:
 ```
 
 Add dialog recovery (`client.dismiss_dialog()`) in the loop if GUI dialogs may appear.
+
+## Reading outputs manually (when `read_results` returns empty)
+
+`read_results()` uses `maeGetResultOutputs` which only returns "saved outputs" configured in Maestro. For outputs that aren't in the saved list (e.g. PSS harmonics, custom expressions), read them directly:
+
+```python
+# Open results for a specific history
+client.execute_skill(f'maeOpenResults(?history "{history}")')
+
+# Read a specific output by name and test
+r = client.execute_skill(f'maeGetOutputValue("HD1_HD3" "IB_PSS")')
+value = float(r.output) if r.output and r.output != "nil" else None
+print(f"HD1/HD3 = {value}")
+
+# Read multiple outputs
+for output_name in ["HD1_HD3", "SFDR", "PN_1MHz"]:
+    r = client.execute_skill(f'maeGetOutputValue("{output_name}" "IB_PSS")')
+    print(f"  {output_name} = {r.output}")
+
+# Always close results when done
+client.execute_skill('maeCloseResults()')
+```
+
+**Note:** `maeOpenResults` / `maeCloseResults` may switch Maestro to read-only mode. If you need to run another simulation afterwards, use `open_gui_session` to re-establish editable mode.

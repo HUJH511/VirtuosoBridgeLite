@@ -6,6 +6,7 @@ from virtuoso_bridge.virtuoso.maestro.session import (
     find_open_session,
     open_gui_session,
     close_gui_session,
+    _purge_maestro_cellviews as purge_maestro_cellviews,
 )
 from virtuoso_bridge.virtuoso.maestro.reader import read_config, read_env, read_results, export_waveform
 from virtuoso_bridge.virtuoso.maestro.writer import (
@@ -59,6 +60,7 @@ __all__ = [
     "find_open_session",
     "open_gui_session",
     "close_gui_session",
+    "purge_maestro_cellviews",
     # read
     "read_config",
     "read_env",
