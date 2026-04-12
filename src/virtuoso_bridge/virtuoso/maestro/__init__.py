@@ -4,6 +4,9 @@ from virtuoso_bridge.virtuoso.maestro.session import (
     open_session,
     close_session,
     find_open_session,
+    open_gui_session,
+    close_gui_session,
+    _purge_maestro_cellviews as purge_maestro_cellviews,
 )
 from virtuoso_bridge.virtuoso.maestro.reader import read_config, read_env, read_results, export_waveform
 from virtuoso_bridge.virtuoso.maestro.writer import (
@@ -27,6 +30,7 @@ from virtuoso_bridge.virtuoso.maestro.writer import (
     set_sim_option,
     # corners
     set_corner,
+    setup_corner,
     load_corners,
     # run mode / job control
     set_current_run_mode,
@@ -35,6 +39,7 @@ from virtuoso_bridge.virtuoso.maestro.writer import (
     # simulation
     run_simulation,
     wait_until_done,
+    run_and_wait,
     # export
     create_netlist_for_corner,
     export_output_view,
@@ -53,6 +58,9 @@ __all__ = [
     "open_session",
     "close_session",
     "find_open_session",
+    "open_gui_session",
+    "close_gui_session",
+    "purge_maestro_cellviews",
     # read
     "read_config",
     "read_env",
@@ -78,6 +86,7 @@ __all__ = [
     "set_sim_option",
     # write - corners
     "set_corner",
+    "setup_corner",
     "load_corners",
     # write - run mode / job control
     "set_current_run_mode",
@@ -86,6 +95,7 @@ __all__ = [
     # write - simulation
     "run_simulation",
     "wait_until_done",
+    "run_and_wait",
     # write - export
     "create_netlist_for_corner",
     "export_output_view",

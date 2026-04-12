@@ -15,7 +15,11 @@ RBPython = if(getShellEnvVar("RB_PYTHON_PATH") then
             else
                 "python"
             )
-RBPort = 65432                                                                   ; TCP port for client connections
+RBPort = if(getShellEnvVar("RB_PORT") then
+                atoi(getShellEnvVar("RB_PORT"))
+            else
+                65432
+            )                                                                      ; TCP port for client connections
 RBLocal = nil                                                                      ; Local-only connections (127.0.0.1 vs 0.0.0.0)
 RBEcho = nil                                                                     ; Echo bridging messages for debugging
 RBDLog = nil                                                                     ; Enable daemon logging to /tmp/RB.log
@@ -80,7 +84,7 @@ procedure(RBStart()
 			; Use "env -u" to strip Virtuoso's LD_LIBRARY_PATH / LD_PRELOAD
 			; so the system Python links against its own libs, not Virtuoso's
 			; bundled (and often incompatible) copies.
-			RBIpc = ipcBeginProcess(sprintf(nil "/usr/bin/env -u LD_LIBRARY_PATH -u LD_PRELOAD %s %L %L %L" RBPython RBDPath host RBPort) "" 'RBIpcDataHandler 'RBIpcErrHandler 'RBIpcFinishHandler logpath)
+			RBIpc = ipcBeginProcess(sprintf(nil "/usr/bin/env -u LD_LIBRARY_PATH -u LD_PRELOAD stdbuf -oL %s -u %L %L %L" RBPython RBDPath host RBPort) "" 'RBIpcDataHandler 'RBIpcErrHandler 'RBIpcFinishHandler logpath)
 		)
 		printf("[RAMIC Bridge (%L)] start at (%s)\n" RBIpc getCurrentTime())
 	)

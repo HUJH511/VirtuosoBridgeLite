@@ -121,8 +121,15 @@ def find_dialogs(display):
         # Skip very tiny windows
         if geo_w < 20 or geo_h < 20:
             continue
-        # Skip windows too large to be dialogs (either dimension > 500)
-        if geo_w > 500 or geo_h > 500:
+        # Thresholds derived from observed Virtuoso window sizes at 1x DPI:
+        #   Modal dialogs:  ~300-600w × 100-350h  (e.g. ADE "Update and Run" ≈ 580×140)
+        #   Editor/log panes: ~500-800w × 500-900h (e.g. spectre.out ≈ 535×755)
+        #   Main app frames: 1200+w × 700+h
+        # Skip tall windows (editor/result panes, not modal dialogs).
+        if geo_h > 420:
+            continue
+        # Skip windows that are very large in both dimensions (main app frames).
+        if geo_w > 1000 and geo_h > 300:
             continue
 
         candidates.append(win_id)
@@ -206,8 +213,52 @@ def _find_app_child(display, frame_id_str):
     return frame_id_str  # fallback to frame itself
 
 
-def dismiss_window(display, win_id_str):
-    """Send Enter key to a window via XTest."""
+def _send_alt_n(dpy, xlib, xtst):
+    """Send Alt+N to trigger the No button mnemonic."""
+    keysym_alt_l = 0xffe9  # XK_Alt_L
+    keysym_n = 0x006e      # XK_n
+    kc_alt = xlib.XKeysymToKeycode(dpy, keysym_alt_l)
+    kc_n = xlib.XKeysymToKeycode(dpy, keysym_n)
+
+    xtst.XTestFakeKeyEvent(dpy, kc_alt, True, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_n, True, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_n, False, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_alt, False, 0)
+    xlib.XFlush(dpy)
+    return kc_alt, kc_n
+
+
+def _send_alt_y(dpy, xlib, xtst):
+    """Send Alt+Y to trigger the Yes button mnemonic."""
+    keysym_alt_l = 0xffe9  # XK_Alt_L
+    keysym_y = 0x0079      # XK_y
+    kc_alt = xlib.XKeysymToKeycode(dpy, keysym_alt_l)
+    kc_y = xlib.XKeysymToKeycode(dpy, keysym_y)
+
+    xtst.XTestFakeKeyEvent(dpy, kc_alt, True, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_y, True, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_y, False, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_alt, False, 0)
+    xlib.XFlush(dpy)
+    return kc_alt, kc_y
+
+
+def _send_escape(dpy, xlib, xtst):
+    """Send Escape key (maps to Cancel on most dialogs)."""
+    keysym_esc = 0xff1b  # XK_Escape
+    kc_esc = xlib.XKeysymToKeycode(dpy, keysym_esc)
+    xtst.XTestFakeKeyEvent(dpy, kc_esc, True, 0)
+    xtst.XTestFakeKeyEvent(dpy, kc_esc, False, 0)
+    xlib.XFlush(dpy)
+    return kc_esc
+
+
+def dismiss_window(display, win_id_str, title="", x=0, y=0, w=0, h=0):
+    """Dismiss a window via XTest.
+
+    Default behavior is Enter.
+    For Save As prompts, prefer 'n' (No) to avoid Save/Copy dialog loops.
+    """
     os.environ["DISPLAY"] = display
     xlib_path = ctypes.util.find_library("X11")
     xtst_path = ctypes.util.find_library("Xtst")
@@ -231,14 +282,109 @@ def dismiss_window(display, win_id_str):
 
     time.sleep(0.15)
 
-    keysym_return = 0xff0d  # XK_Return
-    keycode = xlib.XKeysymToKeycode(dpy, keysym_return)
+    title_l = (title or "").lower()
+    # Policy values:
+    # - smart   : choose action by explicit context (dedupe -> No, default -> Cancel)
+    # - discard : always choose No
+    # - save    : always choose Yes
+    # - cancel  : always choose Cancel
+    save_policy = (os.environ.get("VB_SAVE_DIALOG_POLICY", "smart") or "smart").lower()
+    save_context = (os.environ.get("VB_SAVE_DIALOG_CONTEXT", "") or "").lower()
+    if ("save as" in title_l) or ("save a copy" in title_l):
+        try:
+            if save_policy == "discard":
+                kc_alt, kc_n = _send_alt_n(dpy, xlib, xtst)
+                xlib.XCloseDisplay(dpy)
+                return {
+                    "dismissed": win_id_str,
+                    "child": child_id_str,
+                    "action": "alt_n_no",
+                    "title": title,
+                    "policy": save_policy,
+                    "keycode_alt": int(kc_alt),
+                    "keycode_n": int(kc_n),
+                }
+            elif save_policy == "save":
+                kc_alt, kc_y = _send_alt_y(dpy, xlib, xtst)
+                xlib.XCloseDisplay(dpy)
+                return {
+                    "dismissed": win_id_str,
+                    "child": child_id_str,
+                    "action": "alt_y_yes",
+                    "title": title,
+                    "policy": save_policy,
+                    "keycode_alt": int(kc_alt),
+                    "keycode_y": int(kc_y),
+                }
+            elif save_policy == "cancel":
+                kc_esc = _send_escape(dpy, xlib, xtst)
+                xlib.XCloseDisplay(dpy)
+                return {
+                    "dismissed": win_id_str,
+                    "child": child_id_str,
+                    "action": "esc_cancel",
+                    "title": title,
+                    "policy": save_policy,
+                    "keycode_esc": int(kc_esc),
+                }
+            else:
+                if save_context == "dedupe":
+                    kc_alt, kc_n = _send_alt_n(dpy, xlib, xtst)
+                    xlib.XCloseDisplay(dpy)
+                    return {
+                        "dismissed": win_id_str,
+                        "child": child_id_str,
+                        "action": "alt_n_no_dedupe",
+                        "title": title,
+                        "policy": "smart",
+                        "context": save_context,
+                        "keycode_alt": int(kc_alt),
+                        "keycode_n": int(kc_n),
+                    }
+
+                kc_esc = _send_escape(dpy, xlib, xtst)
+                xlib.XCloseDisplay(dpy)
+                return {
+                    "dismissed": win_id_str,
+                    "child": child_id_str,
+                    "action": "esc_cancel_smart",
+                    "title": title,
+                    "policy": "smart",
+                    "context": save_context,
+                    "keycode_esc": int(kc_esc),
+                }
+        except Exception:
+            # Fallback: send bare 'n' key and return immediately.
+            keysym_n = 0x006e  # XK_n
+            kc_n = xlib.XKeysymToKeycode(dpy, keysym_n)
+            xtst.XTestFakeKeyEvent(dpy, kc_n, True, 0)
+            xtst.XTestFakeKeyEvent(dpy, kc_n, False, 0)
+            xlib.XFlush(dpy)
+            xlib.XCloseDisplay(dpy)
+            return {
+                "dismissed": win_id_str,
+                "child": child_id_str,
+                "keycode": int(kc_n),
+                "action": "no_fallback",
+                "title": title,
+            }
+    else:
+        keysym = 0xff0d  # XK_Return
+        action = "enter"
+
+    keycode = xlib.XKeysymToKeycode(dpy, keysym)
     xtst.XTestFakeKeyEvent(dpy, keycode, True, 0)
     xtst.XTestFakeKeyEvent(dpy, keycode, False, 0)
     xlib.XFlush(dpy)
 
     xlib.XCloseDisplay(dpy)
-    return {"dismissed": win_id_str, "child": child_id_str, "keycode": int(keycode)}
+    return {
+        "dismissed": win_id_str,
+        "child": child_id_str,
+        "keycode": int(keycode),
+        "action": action,
+        "title": title,
+    }
 
 
 def main():
@@ -272,7 +418,15 @@ def main():
     if do_dismiss:
         for d in dialogs:
             if "window_id" in d:
-                result = dismiss_window(display, d["window_id"])
+                result = dismiss_window(
+                    display,
+                    d["window_id"],
+                    d.get("title", ""),
+                    d.get("x", 0),
+                    d.get("y", 0),
+                    d.get("w", 0),
+                    d.get("h", 0),
+                )
                 print(json.dumps(result))
 
     sys.exit(0)

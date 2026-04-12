@@ -12,8 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
+from virtuoso_bridge.env import load_vb_env
 from virtuoso_bridge.virtuoso.basic.composition import compose_skill_script
 from virtuoso_bridge.models import ExecutionStatus, VirtuosoInterface, VirtuosoResult
 from virtuoso_bridge.virtuoso.ops import (
@@ -110,7 +109,7 @@ class VirtuosoClient(VirtuosoInterface):
         etc.  If an SSH tunnel is already running (via ``virtuoso-bridge start``),
         connects to its port.  Otherwise creates a new SSHClient.
         """
-        load_dotenv()
+        load_vb_env()
         from virtuoso_bridge.transport.tunnel import SSHClient
 
         # Check if tunnel is already running
@@ -124,7 +123,11 @@ class VirtuosoClient(VirtuosoInterface):
         suffix = f"_{profile}" if profile else ""
         remote_host = os.getenv(f"VB_REMOTE_HOST{suffix}", "").strip()
         if not remote_host:
-            raise RuntimeError(f"VB_REMOTE_HOST{suffix} must be set. Run: virtuoso-bridge init")
+            raise RuntimeError(
+                f"VB_REMOTE_HOST{suffix} must be set. "
+                "Use an explicit env file, create ./.env, or run `virtuoso-bridge init` "
+                "to create ~/.virtuoso-bridge/.env."
+            )
 
         ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
         return cls(host="127.0.0.1", port=ssh.port, timeout=timeout, tunnel=ssh, log_to_ciw=log_to_ciw)
@@ -379,7 +382,7 @@ class VirtuosoClient(VirtuosoInterface):
         skill = op_open_cell_view(lib, cell, actual_view, actual_view_type, mode)
         return self.execute_skill(skill, timeout=effective_timeout)
 
-    def open_window(self, lib: str, cell: str, *, view: str = "layout",
+    def open_window(self, lib: str, cell: str, *, view: str = "schematic",
                     view_type: str | None = None, timeout: int | None = None) -> VirtuosoResult:
         effective_timeout = timeout if timeout is not None else self._timeout
         skill = op_open_window(lib, cell, view=view, view_type=view_type)
@@ -441,11 +444,12 @@ class VirtuosoClient(VirtuosoInterface):
         Use when execute_skill() times out due to a modal dialog blocking CIW.
         Works via direct SSH + X11, independent of the SKILL channel.
         """
+        load_vb_env()
         from virtuoso_bridge.virtuoso import x11
         runner = self.ssh_runner
         if runner is None:
             raise RuntimeError("No SSH connection (tunnel not started?)")
-        user = os.getenv("VB_REMOTE_USER", "")
+        user = runner.user or os.getenv("VB_REMOTE_USER", "")
         return x11.dismiss_dialogs(runner, user, display)
 
     # -- file transfer (delegates to tunnel) --------------------------------

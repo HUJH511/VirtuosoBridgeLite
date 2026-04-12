@@ -207,28 +207,49 @@ maeSetVar("c_val" "1p,100f" ?session "fnxSession4")
 
 ### Corners
 
-Corner management has limited SKILL API support. `maeSetCorner` can only create/enable/disable corners. Model files and variables must be set by editing `maestro.sdb` XML directly.
-
-#### Read corners
-
-Corners are stored in `maestro.sdb` XML. Download and parse:
-
-```python
-client.download_file(f'{maestro_dir}/maestro.sdb', '/tmp/maestro.sdb')
-# Parse <corner enabled="1">name ... </corner> blocks
-# Each corner has: <vars>, <models> sub-elements
-```
-
 #### Create corner (empty)
 
 ```scheme
-; Creates corner with no model/var — only ?enabled is supported
 maeSetCorner("tt_25" ?enabled t)
 ```
 
-#### Create corner with model + temperature
+**Note:** `maeSetCorner` only accepts `?enabled` and `?disableTests`. Keywords like `?temperature`, `?model`, `?modelFile`, `?modelSection` do NOT work.
 
-Full corners (with model file and variables) require editing `maestro.sdb` XML. Close the maestro session first, then insert a corner XML block before `</corners>`:
+#### Create corner with model + temperature (pure SKILL API)
+
+Full corners — with model files, variables, and temperature — can be set up entirely via SKILL using `maeSetVar` (with `?typeName "corner"`) and the `axl*` setup-DB functions. No XML editing required:
+
+```scheme
+; 1. Open maestro session
+sess = maeOpenSetup(libName cellName "maestro" ?mode "a")
+
+; 2. Create or select the corner
+maeSetCorner("tt_25" ?session sess)
+
+; 3. Set corner-specific variables (temperature, voltages, etc.)
+maeSetVar("temperature" "25" ?typeName "corner" ?typeValue '("tt_25") ?session sess)
+maeSetVar("vdd" "1.2" ?typeName "corner" ?typeValue '("tt_25") ?session sess)
+
+; 4. Set model file + section via axl* setup-DB API
+sdb  = axlGetMainSetupDB(sess)
+corn = axlGetCorner(sdb "tt_25")
+model = axlPutModel(corn "mypdk.scs")
+axlSetModelFile(model "/path/to/model/mypdk.scs")
+axlSetModelSection(model "tt")
+
+; 5. Save and close
+maeSaveSetup(?lib libName ?cell cellName ?view "maestro" ?session sess)
+maeCloseSession(?session sess)
+```
+
+Key points:
+- `maeSetVar` with `?typeName "corner"` and `?typeValue '("corner_name")` binds a variable to a specific corner
+- `axlGetMainSetupDB` / `axlGetCorner` / `axlPutModel` provide direct access to the corner's model configuration
+- This approach keeps the session open throughout — no need to close/edit XML/reopen
+
+#### Alternative: XML editing (legacy approach)
+
+If the `axl*` functions are unavailable (older Virtuoso versions), corners can also be configured by editing `maestro.sdb` XML directly. Close the maestro session first, then insert a corner XML block before `</corners>`:
 
 ```xml
 <corner enabled="1">tt_25
@@ -248,18 +269,28 @@ Full corners (with model file and variables) require editing `maestro.sdb` XML. 
 </corner>
 ```
 
-Python helper to insert corners (runs on remote via `upload_file` + `run_shell_command`):
-
 ```python
 # 1. Close maestro session
 client.execute_skill('MaestroClose("myLib" "myCell")')
 
 # 2. Edit sdb on remote (python2 script uploaded and executed)
 # Insert new corner XML blocks before first </corners> tag
-# See edit_sdb.py pattern: read lines, insert before </corners>, write back
 
 # 3. Reopen maestro to load changes
 client.execute_skill('MaestroOpen("myLib" "myCell")')
+```
+
+#### Read corners
+
+```scheme
+maeGetSetup(?session sess ?typeName "corners")
+```
+
+Alternatively, corners are stored in `maestro.sdb` XML and can be parsed directly:
+
+```python
+client.download_file(f'{maestro_dir}/maestro.sdb', '/tmp/maestro.sdb')
+# Parse <corner enabled="1">name ... </corner> blocks
 ```
 
 #### Enable / Disable corner
@@ -275,15 +306,6 @@ maeSetCorner("tt_25" ?enabled nil)  ; disable
 maeDeleteCorner("tt_25")
 maeSaveSetup()  ; persist deletion
 ```
-
-**Note:** `maeDeleteCorner` works in memory. `maeSaveSetup` persists to sdb. If the corner was inserted by direct sdb edit without reopening maestro first, the deletion may not take effect — always reopen maestro after sdb edits before using mae* functions.
-
-#### Explored but unsupported keywords
-
-`maeSetCorner` only accepts `?enabled`. These keywords do NOT work:
-`?temperature`, `?model`, `?modelFile`, `?modelSection`, `?vars`, `?models`, `?varList`, `?file`, `?section`, `?copy`, `?copyFrom`
-
-`maeLoadCorners(filepath)` accepts a file path but does not import corners in practice (returns nil silently).
 
 ### Environment Options (Model Files)
 
@@ -310,12 +332,32 @@ maeSaveSetup(?lib "myLib" ?cell "myCell" ?view "maestro" ?session "fnxSession4")
 ; GUI stays responsive, results appear automatically in Maestro window
 maeRunSimulation()
 maeRunSimulation(?session "fnxSession4")
+```
 
-; Wait separately (if async)
+#### Post-simulation callback (recommended)
+
+Use `?callback` to register a procedure that is called automatically when the simulation finishes. This is non-blocking — the SKILL channel and GUI remain responsive:
+
+```scheme
+; Define callback — receives session handle and run ID
+procedure(RunFinishedCallback(session runID)
+  printf("Run ID %L has finished\n" runID)
+)
+
+; Run with callback — returns immediately, callback fires on completion
+maeRunSimulation(?callback "RunFinishedCallback")
+```
+
+The callback receives two arguments: `session` (the maestro session) and `runID` (e.g. `"Interactive.3"`). This is the cleanest way to chain post-simulation actions (result reading, export, next optimization iteration, etc.) without blocking.
+
+#### Blocking wait (use with caution)
+
+```scheme
+; Blocks the SKILL channel until all simulations finish
 maeWaitUntilDone('All)
 ```
 
-**Important:** `maeRunSimulation(?waitUntilDone t)` blocks Virtuoso's event loop, which prevents the GUI from refreshing and can break the bridge connection. Use **async** `maeRunSimulation()` + `maeWaitUntilDone('All)` instead.
+**Important:** `maeRunSimulation(?waitUntilDone t)` blocks Virtuoso's entire event loop, which prevents the GUI from refreshing and can break the bridge connection. If you must wait synchronously, use `maeRunSimulation()` + `maeWaitUntilDone('All)` instead — it still blocks the SKILL channel but doesn't freeze the GUI. Prefer `?callback` for a fully non-blocking approach.
 
 **Important:** Results only appear automatically in the Maestro GUI when the maestro window was opened via `deOpenCellView` **before** running. If maestro was only opened as a backend session (`maeOpenSetup`), results won't display.
 
@@ -522,10 +564,16 @@ client.execute_skill(
     f'?signalName "/OUT" ?session "{session}")')
 client.execute_skill(f'maeSetVar("c_val" "1p,100f" ?session "{session}")')
 
-# 5. Save + run (async — never use ?waitUntilDone t, it blocks the event loop)
+# 5. Save + run
 client.execute_skill(
     f'maeSaveSetup(?lib "{lib}" ?cell "{cell}" '
     f'?view "maestro" ?session "{session}")')
+
+# Option A: use run_and_wait() from Python API (recommended — uses ?callback, non-blocking)
+# from virtuoso_bridge.virtuoso.maestro import run_and_wait
+# history, status = run_and_wait(client, session=session, timeout=300)
+
+# Option B: blocking wait via SKILL (simpler but blocks SKILL channel)
 client.execute_skill(f'maeRunSimulation(?session "{session}")')
 client.execute_skill("maeWaitUntilDone('All)", timeout=300)
 

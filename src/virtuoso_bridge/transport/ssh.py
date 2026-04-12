@@ -20,6 +20,8 @@ import uuid
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from virtuoso_bridge.env import load_vb_env
+
 logger = logging.getLogger(__name__)
 
 # ── Command log file ─────────────────────────────────────────────────────
@@ -60,16 +62,26 @@ def _mark_interpreter_shutdown() -> None:
 atexit.register(_mark_interpreter_shutdown)
 
 
-def _windows_no_window_kwargs() -> dict[str, Any]:
-    """Best-effort hidden console launch on Windows for CLI tools like ssh/scp/tar."""
+def _windows_no_window_kwargs(
+    *,
+    detached: bool = True,
+    new_process_group: bool = False,
+) -> dict[str, Any]:
+    """Best-effort Windows process flags for CLI tools like ssh/scp/tar."""
     if os.name != "nt":
         return {}
 
     startupinfo = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
     startupinfo.wShowWindow = 0  # SW_HIDE
+    creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    if detached:
+        creationflags |= subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+    if new_process_group:
+        creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     return {
-        "creationflags": subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+        "creationflags": creationflags,
+        "close_fds": True,
         "startupinfo": startupinfo,
     }
 
@@ -87,6 +99,7 @@ def remote_ssh_env_from_os(profile: str | None = None) -> RemoteSshEnv:
     If *profile* is given (e.g. ``"gpu1"``), reads ``VB_REMOTE_HOST_GPU1``
     etc.  Otherwise reads the default unsuffixed variables.
     """
+    load_vb_env()
     suffix = f"_{profile}" if profile else ""
 
     def _strip(name: str) -> str | None:
@@ -110,6 +123,14 @@ class CommandResult(NamedTuple):
     stdout: str
     stderr: str
 
+
+def _tool_override_from_env(var_name: str) -> str | None:
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return None
+    value = os.path.expandvars(os.path.expanduser(raw.strip()))
+    return value or None
+
 def _derive_tool(base_cmd: str, old_name: str, new_name: str) -> str:
     """Derive a sibling tool path from a known tool (e.g. ssh -> scp).
 
@@ -120,27 +141,7 @@ def _derive_tool(base_cmd: str, old_name: str, new_name: str) -> str:
             candidate = base_cmd[: -len(suffix)] + new_name + (".exe" if suffix.endswith(".exe") else "")
             if os.path.isfile(candidate):
                 return candidate
-    return shutil.which(new_name) or _find_git_tool(new_name) or new_name
-
-
-def _find_git_tool(name: str) -> str | None:
-    """Find a tool (ssh, scp, tar) in Git for Windows usr/bin.
-
-    On Windows, Python venvs inherit only the Windows system PATH, which
-    typically includes Git\\cmd (git.exe) but NOT Git\\usr\\bin (ssh, scp, tar).
-    Git Bash adds usr/bin via its own profile, but that's invisible to Python.
-    """
-    if os.name != "nt":
-        return None
-    for base in [
-        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "usr", "bin"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "usr", "bin"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "usr", "bin"),
-    ]:
-        candidate = os.path.join(base, f"{name}.exe")
-        if os.path.isfile(candidate):
-            return candidate
-    return None
+    return shutil.which(new_name) or new_name
 
 
 class SSHRunner:
@@ -160,6 +161,7 @@ class SSHRunner:
         persistent_shell: bool = False,
         verbose: bool = False,
     ) -> None:
+        load_vb_env()
         self._host = host
         self._user = user
         self._jump_host = jump_host
@@ -168,11 +170,16 @@ class SSHRunner:
         self._ssh_config_path = ssh_config_path
         self._timeout = timeout
         self._connect_timeout = connect_timeout
-        self._persistent_shell_enabled = persistent_shell
+        self._persistent_shell_enabled = persistent_shell and os.name != "nt"
         self._verbose = verbose
 
-        self._ssh_cmd = ssh_cmd or shutil.which("ssh") or _find_git_tool("ssh") or "ssh"
-        self._tar_cmd = shutil.which("tar") or _find_git_tool("tar") or "tar"
+        env_ssh_cmd = _tool_override_from_env("VB_SSH_CMD")
+        env_scp_cmd = _tool_override_from_env("VB_SCP_CMD")
+        env_tar_cmd = _tool_override_from_env("VB_TAR_CMD")
+
+        self._ssh_cmd = ssh_cmd or env_ssh_cmd or shutil.which("ssh") or "ssh"
+        self._scp_cmd = env_scp_cmd or _derive_tool(self._ssh_cmd, "ssh", "scp")
+        self._tar_cmd = env_tar_cmd or shutil.which("tar") or "tar"
 
         # ControlMaster socket path for SSH connection multiplexing.
         # All ssh/scp calls to the same host reuse one TCP connection.
@@ -189,6 +196,8 @@ class SSHRunner:
 
         if not self._use_control_master:
             logger.debug("ControlMaster disabled (os=%s, env_override=%s)", os.name, _disable_cm)
+        if persistent_shell and not self._persistent_shell_enabled:
+            logger.debug("Persistent SSH shell disabled on Windows for host %s", host)
 
         self._shell_proc: subprocess.Popen[bytes] | None = None
         self._shell_queue: queue.Queue[str | None] | None = None
@@ -249,20 +258,38 @@ class SSHRunner:
             print(f"[cmd] {' '.join(cmd)}", flush=True)
 
         if os.name == "nt":
-            pid = self._start_hidden_windows_process(cmd)
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **_windows_no_window_kwargs(detached=True, new_process_group=True),
+            )
             jh_settle = max(settle, 3.0) if self._jump_host else settle
             deadline = time.monotonic() + jh_settle
             while time.monotonic() < deadline:
                 if self.can_reach_port(port):
-                    self._tunnel_pid = pid
-                    self._tunnel_using_external = True
-                    return None
+                    self._tunnel_proc = proc
+                    self._tunnel_pid = proc.pid
+                    self._tunnel_using_external = False
+                    return proc
+                if proc.poll() is not None:
+                    break
                 time.sleep(0.1)
+            if self.can_reach_port(port):
+                logger.info("Reusing existing tunnel at localhost:%d", port)
+                self._tunnel_using_external = True
+                return None
             try:
-                os.kill(pid, signal.SIGTERM)
+                proc.terminate()
+                proc.wait(timeout=2)
             except OSError:
                 pass
-            raise RuntimeError("SSH tunnel failed to start on Windows")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            rc = proc.poll()
+            detail = f" (rc={rc})" if rc is not None else ""
+            raise RuntimeError(f"SSH tunnel failed to start on Windows{detail}")
 
         popen_kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
@@ -369,34 +396,6 @@ class SSHRunner:
             return True
         except (ConnectionRefusedError, OSError):
             return False
-
-    @staticmethod
-    def _start_hidden_windows_process(cmd: list[str]) -> int:
-        """Start a process with hidden console on Windows."""
-        def _ps_quote(value: str) -> str:
-            return "'" + value.replace("'", "''") + "'"
-
-        file_path = _ps_quote(cmd[0])
-        args = ", ".join(_ps_quote(part) for part in cmd[1:])
-        script = (
-            f"$p = Start-Process -FilePath {file_path} "
-            f"-ArgumentList @({args}) -WindowStyle Hidden -PassThru; "
-            "$p.Id"
-        )
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to launch hidden SSH tunnel: {result.stderr.strip()}")
-        try:
-            return int(result.stdout.strip().splitlines()[-1])
-        except (IndexError, ValueError) as exc:
-            raise RuntimeError(
-                f"Failed to parse hidden SSH tunnel PID: {result.stdout.strip()!r}"
-            ) from exc
 
     # -- connection test -------------------------------------------------------
 
@@ -621,8 +620,7 @@ class SSHRunner:
             return self._download_via_tar(remote_path, local_path, timeout=effective_timeout)
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        scp_bin = _derive_tool(self._ssh_cmd, "ssh", "scp")
-        cmd = [scp_bin] + self._common_ssh_options()
+        cmd = [self._scp_cmd] + self._common_ssh_options()
         cmd += [self._remote_scp_target(remote_path), str(local_path)]
         self._print_cmd(cmd)
         logger.debug("Downloading via scp %s:%s -> %s", self._host, remote_path, local_path)
@@ -1049,6 +1047,11 @@ class SSHRunner:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        if proc is not None and proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
         if reader is not None and reader.is_alive():
             reader.join(timeout=1)
         self._shell_proc = None

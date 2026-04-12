@@ -45,6 +45,29 @@ client.execute_skill('hiWindowSaveImage(?target hiGetCurrentWindow() ?path "/tmp
 client.download_file("/tmp/debug.png", "output/debug.png")
 ```
 
+### ASSEMBLER-8127: cellview already open in edit mode
+`maeMakeEditable()` fails with a modal dialog when the same cellview is already open in editable mode in another session (e.g. `fnxSession21` has it open while you try from `fnxSession0`). This dialog **completely blocks** the SKILL channel — even `hiFormDone` cannot reach it.
+
+**Never call `maeMakeEditable()` unconditionally.** It can deadlock the bridge.
+
+**Recovery when stuck:** if the remote has no `python3` or `xdotool`, send Enter via Python 2.7 + ctypes directly on the Virtuoso display:
+```bash
+# Find the Virtuoso DISPLAY (check /proc/<pid>/environ)
+DISPLAY=<virtuoso_display> python2.7 -c "
+import ctypes, ctypes.util
+xlib = ctypes.cdll.LoadLibrary(ctypes.util.find_library('X11'))
+xtst = ctypes.cdll.LoadLibrary(ctypes.util.find_library('Xtst'))
+dpy = xlib.XOpenDisplay(None)
+kc = xlib.XKeysymToKeycode(dpy, 0xff0d)
+xtst.XTestFakeKeyEvent(dpy, kc, True, 0)
+xtst.XTestFakeKeyEvent(dpy, kc, False, 0)
+xlib.XFlush(dpy)
+xlib.XCloseDisplay(dpy)
+"
+```
+
+**Prevention:** before calling `maeMakeEditable()`, check if another session already has the cellview open in edit mode.
+
 ---
 
 ## Netlist / si

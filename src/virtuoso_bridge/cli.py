@@ -11,8 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
-
+from virtuoso_bridge.env import default_user_env_path, load_vb_env, set_runtime_env_file
 from virtuoso_bridge.transport.ssh import SSHRunner, remote_ssh_env_from_os
 
 
@@ -33,51 +32,8 @@ def _generate_env_template() -> str:
     return template.format(remote_port=remote_port, local_port=local_port)
 
 
-def _is_virtuoso_bridge_project(pyproject: Path) -> bool:
-    try:
-        head = pyproject.read_text(encoding="utf-8")[:4000]
-    except OSError:
-        return False
-    return 'name = "virtuoso-bridge"' in head
-
-
-def _repo_root() -> Path:
-    raw = os.environ.get("VIRTUOSO_BRIDGE_ROOT", "").strip()
-    if raw:
-        p = Path(raw).expanduser().resolve()
-        if _is_virtuoso_bridge_project(p / "pyproject.toml"):
-            return p
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        pm = parent / "pyproject.toml"
-        if pm.is_file() and _is_virtuoso_bridge_project(pm):
-            return parent
-    cwd = Path.cwd()
-    nested = cwd / "virtuoso-bridge" / "pyproject.toml"
-    if nested.is_file() and _is_virtuoso_bridge_project(nested):
-        return nested.parent
-    root_pm = cwd / "pyproject.toml"
-    if root_pm.is_file() and _is_virtuoso_bridge_project(root_pm):
-        return cwd
-    raise RuntimeError(
-        "Could not locate virtuoso-bridge project root. "
-        "Run from the repo directory or set VIRTUOSO_BRIDGE_ROOT."
-    )
-
-
-def _load_repo_env() -> None:
-    # Try repo root first
-    vb_env = _repo_root() / ".env"
-    if vb_env.is_file():
-        load_dotenv(vb_env, override=True)
-        return
-    # Search CWD and all parent directories for .env
-    cwd = Path.cwd().resolve()
-    for parent in [cwd, *cwd.parents]:
-        candidate = parent / ".env"
-        if candidate.is_file():
-            load_dotenv(candidate, override=True)
-            return
+def _load_cli_env() -> Path | None:
+    return load_vb_env()
 
 
 def _fmt(seconds: float) -> str:
@@ -87,7 +43,8 @@ def _fmt(seconds: float) -> str:
 # -- init -------------------------------------------------------------------
 
 def cli_init() -> int:
-    env_path = _repo_root() / ".env"
+    env_path = default_user_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
     if env_path.exists():
         print(f".env already exists at {env_path}")
     else:
@@ -103,11 +60,17 @@ def _ssh_precheck(profile: str | None = None) -> int | None:
     """Quick SSH connectivity check. Returns exit code on failure, None on success."""
     ssh_env = remote_ssh_env_from_os(profile)
 
-    if ssh_env.jump_host:
+    # When a remote target is configured, prefer a single end-to-end probe.
+    # On some Windows/OpenSSH + remote-shell combinations, probing the jump
+    # host alone via ``ssh host -T exit 0`` can false-negative even though the
+    # actual proxied connection to the remote host succeeds.
+    if ssh_env.jump_host and not ssh_env.remote_host:
         user = ssh_env.jump_user or ssh_env.remote_user
         runner = SSHRunner(host=ssh_env.jump_host, user=user, connect_timeout=5, persistent_shell=False)
         if not runner.test_connection():
-            print(f"SSH to jump host {ssh_env.jump_host} failed. Fix SSH first.")
+            print(f"SSH to jump host {ssh_env.jump_host} failed.")
+            print(f"  Check VB_JUMP_HOST in your .env file.")
+            print(f"  Verify: ssh {user}@{ssh_env.jump_host}")
             return 1
 
     if ssh_env.remote_host:
@@ -118,7 +81,13 @@ def _ssh_precheck(profile: str | None = None) -> int | None:
             connect_timeout=5, persistent_shell=False,
         )
         if not runner.test_connection():
-            print(f"SSH to {ssh_env.remote_host} failed. Fix SSH first.")
+            print(f"SSH to {ssh_env.remote_host} failed.")
+            print(f"  Check VB_REMOTE_HOST and VB_REMOTE_USER in your .env file.")
+            if ssh_env.jump_host:
+                print(f"  Verify: ssh -J {jump_user}@{ssh_env.jump_host} {ssh_env.remote_user}@{ssh_env.remote_host}")
+            else:
+                print(f"  Verify: ssh {ssh_env.remote_user}@{ssh_env.remote_host}")
+            print(f"  For a local VM, use the VM's IP (run `ip addr` inside the VM).")
             return 1
     return None
 
@@ -128,7 +97,10 @@ def _start_one_profile(profile: str | None) -> int:
     suffix = f"_{profile}" if profile else ""
     remote_host = os.getenv(f"VB_REMOTE_HOST{suffix}", "").strip()
     if not remote_host:
-        print(f"VB_REMOTE_HOST{suffix} is not set. Run: virtuoso-bridge init")
+        print(
+            f"VB_REMOTE_HOST{suffix} is not set. "
+            "Use --env FILE, create ./.env, or run `virtuoso-bridge init` to create ~/.virtuoso-bridge/.env."
+        )
         return 1
 
     from virtuoso_bridge.transport.tunnel import SSHClient, _is_localhost
@@ -151,39 +123,39 @@ def _start_one_profile(profile: str | None) -> int:
     else:
         print(f"Starting tunnel{label}...")
     ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
-    started = time.monotonic()
-    ssh.warm()
-    elapsed = time.monotonic() - started
-    print(f"tunnel.warm = {_fmt(elapsed)}")
+    try:
+        started = time.monotonic()
+        ssh.warm()
+        elapsed = time.monotonic() - started
+        print(f"tunnel.warm = {_fmt(elapsed)}")
 
-    if is_local:
-        # For local mode, print setup_path for user to load in CIW
-        state = SSHClient.read_state(profile)
-        if state:
-            setup_path = state.get("setup_path")
-            if setup_path:
-                print(f"  Load in Virtuoso CIW: load(\"{setup_path}\")")
-        ssh.close()
+        if is_local:
+            # For local mode, print setup_path for user to load in CIW
+            state = SSHClient.read_state(profile)
+            if state:
+                setup_path = state.get("setup_path")
+                if setup_path:
+                    print(f"  Load in Virtuoso CIW: load(\"{setup_path}\")")
+            return 0
+
+        time.sleep(1.0)
+        if not SSHClient.is_running(profile):
+            print("[warning] Tunnel process exited shortly after start.")
+            print("Try starting the tunnel manually:")
+            ssh_env = remote_ssh_env_from_os(profile)
+            port = ssh.port
+            manual_cmd = f"ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -L {port}:127.0.0.1:{port}"
+            if ssh_env.jump_host:
+                jump = f"{ssh_env.jump_user or ssh_env.remote_user}@{ssh_env.jump_host}" if (ssh_env.jump_user or ssh_env.remote_user) else ssh_env.jump_host
+                manual_cmd += f" -J {jump}"
+            target = f"{ssh_env.remote_user}@{ssh_env.remote_host}" if ssh_env.remote_user else ssh_env.remote_host
+            manual_cmd += f" {target}"
+            print(f"  {manual_cmd}")
+            return 1
+
         return 0
-
-    ssh.close()
-
-    time.sleep(1.0)
-    if not SSHClient.is_running(profile):
-        print("[warning] Tunnel process exited shortly after start.")
-        print("Try starting the tunnel manually:")
-        ssh_env = remote_ssh_env_from_os(profile)
-        port = ssh.port
-        manual_cmd = f"ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -L {port}:127.0.0.1:{port}"
-        if ssh_env.jump_host:
-            jump = f"{ssh_env.jump_user or ssh_env.remote_user}@{ssh_env.jump_host}" if (ssh_env.jump_user or ssh_env.remote_user) else ssh_env.jump_host
-            manual_cmd += f" -J {jump}"
-        target = f"{ssh_env.remote_user}@{ssh_env.remote_host}" if ssh_env.remote_user else ssh_env.remote_host
-        manual_cmd += f" {target}"
-        print(f"  {manual_cmd}")
-        return 1
-
-    return 0
+    finally:
+        ssh.close()
 
 
 def _start_one() -> int:
@@ -192,7 +164,7 @@ def _start_one() -> int:
 
 
 def cli_start() -> int:
-    _load_repo_env()
+    _load_cli_env()
     profile = _get_cli_profile()
     if profile is None:
         profiles = _discover_profiles()
@@ -222,7 +194,7 @@ def _stop_one() -> int:
 
 
 def cli_stop() -> int:
-    _load_repo_env()
+    _load_cli_env()
     return _for_each_profile(_stop_one)
 
 
@@ -244,14 +216,22 @@ def _restart_one() -> int:
 
 
 def cli_restart() -> int:
-    _load_repo_env()
+    _load_cli_env()
     return _for_each_profile(_restart_one)
 
 
 # -- status -----------------------------------------------------------------
 
+def _print_load_hint(setup_path: str) -> None:
+    """Print CIW load command and .cdsinit auto-load suggestion."""
+    print(f"\n  Load in Virtuoso CIW:")
+    print(f"    load(\"{setup_path}\")")
+    print(f"\n  To auto-load on every Virtuoso startup, add to your .cdsinit:")
+    print(f"    load(\"{setup_path}\")")
+
+
 def _print_status() -> int:
-    _load_repo_env()
+    _load_cli_env()
     profile = _get_cli_profile()
     from virtuoso_bridge.transport.tunnel import SSHClient, _is_localhost
     from virtuoso_bridge.virtuoso.basic.bridge import VirtuosoClient
@@ -259,8 +239,9 @@ def _print_status() -> int:
     state = SSHClient.read_state(profile)
     running = SSHClient.is_running(profile)
 
+    from virtuoso_bridge import __version__
     label = f" [{profile}]" if profile else ""
-    print(f"  Virtuoso Bridge Status{label}")
+    print(f"  Virtuoso Bridge v{__version__}{label}")
 
     suffix = f"_{profile}" if profile else ""
     configured_host = os.getenv(f"VB_REMOTE_HOST{suffix}", "").strip()
@@ -268,6 +249,17 @@ def _print_status() -> int:
     jump_host = os.getenv(f"VB_JUMP_HOST{suffix}", "").strip()
 
     is_local = _is_localhost(configured_host) if configured_host else False
+
+    # Infer setup_path from user config when state is unavailable
+    def _infer_setup_path() -> str | None:
+        user = configured_user
+        if not user:
+            import getpass
+            try:
+                user = getpass.getuser()
+            except Exception:
+                return None
+        return f"/tmp/virtuoso_bridge_{user}/virtuoso_bridge/virtuoso_setup.il"
 
     if is_local:
         print(f"\n[mode] local (no SSH tunnel)")
@@ -288,6 +280,9 @@ def _print_status() -> int:
             setup_path = state.get("setup_path")
         else:
             setup_path = None
+
+    if not setup_path:
+        setup_path = _infer_setup_path()
 
     # Daemon (Virtuoso CIW)
     # For local mode, check daemon if we have state (don't require 'running')
@@ -320,15 +315,13 @@ def _print_status() -> int:
                     timeout=5,
                 )
             if not ok and setup_path:
-                print(f"\n  Daemon not responding. Load in Virtuoso CIW:")
-                print(f"    load(\"{setup_path}\")")
+                _print_load_hint(setup_path)
         except Exception as e:
             print(f"\n[daemon] error: {e}")
     elif not is_local and not running:
         print(f"\n[daemon] cannot check (tunnel not running)")
         if setup_path:
-            print(f"  After starting, load in Virtuoso CIW:")
-            print(f"    load(\"{setup_path}\")")
+            _print_load_hint(setup_path)
 
     # Spectre
     if is_local or running:
@@ -386,6 +379,7 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
         return
 
     # Remote mode — SSH-based check
+    ssh = None
     try:
         ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
         ssh._ssh_runner._verbose = False
@@ -419,8 +413,6 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
                 result = ssh._ssh_runner.run_command(check_cmd, timeout=15)
                 stdout = result.stdout.strip()
 
-        ssh.close()
-
         spectre_path = None
         version = None
         for line in stdout.splitlines():
@@ -439,6 +431,9 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
             print(f"\n[spectre] NOT FOUND")
     except Exception as e:
         print(f"\n[spectre] error: {e}")
+    finally:
+        if ssh is not None:
+            ssh.close()
 
 
 def _discover_profiles() -> list[str | None]:
@@ -480,14 +475,14 @@ def _for_each_profile(fn: Callable[[], int]) -> int:
 
 
 def cli_status() -> int:
-    _load_repo_env()
+    _load_cli_env()
     return _for_each_profile(_print_status)
 
 
 # -- license ----------------------------------------------------------------
 
 def cli_license() -> int:
-    _load_repo_env()
+    _load_cli_env()
     profile = _get_cli_profile()
     suffix = f"_{profile}" if profile else ""
     cadence_cshrc = os.getenv(f"VB_CADENCE_CSHRC{suffix}", "").strip() or os.getenv("VB_CADENCE_CSHRC", "").strip()
@@ -507,27 +502,31 @@ def cli_license() -> int:
     suffix = f"_{profile}" if profile else ""
     configured_host = os.getenv(f"VB_REMOTE_HOST{suffix}", "").strip()
 
-    if _is_localhost(configured_host):
-        sim = SpectreSimulator.from_env(profile=profile)
-    else:
-        # Create SSHRunner with verbose=False to suppress [cmd] output
-        ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
-        ssh._ssh_runner._verbose = False
-        sim = SpectreSimulator.from_env(profile=profile, ssh_runner=ssh._ssh_runner)
+    ssh = None
+    try:
+        if _is_localhost(configured_host):
+            sim = SpectreSimulator.from_env(profile=profile)
+        else:
+            # Create SSHRunner with verbose=False to suppress [cmd] output
+            ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
+            ssh._ssh_runner._verbose = False
+            sim = SpectreSimulator.from_env(profile=profile, ssh_runner=ssh._ssh_runner)
 
-    info = sim.check_license()
+        info = sim.check_license()
 
-    print(f"[spectre] {info.get('spectre_path', 'NOT FOUND')}")
-    if info.get("version"):
-        print(f"  version: {info['version']}")
-    licenses = info.get("licenses", [])
-    if licenses:
-        print(f"\n[licenses in use] ({len(licenses)} features)")
-        for line in licenses:
-            print(f"  {line}")
+        print(f"[spectre] {info.get('spectre_path', 'NOT FOUND')}")
+        if info.get("version"):
+            print(f"  version: {info['version']}")
+        licenses = info.get("licenses", [])
+        if licenses:
+            print(f"\n[licenses in use] ({len(licenses)} features)")
+            for line in licenses:
+                print(f"  {line}")
 
-    ssh.close()
-    return 0 if info.get("ok") else 1
+        return 0 if info.get("ok") else 1
+    finally:
+        if ssh is not None:
+            ssh.close()
 
 
 # -- main -------------------------------------------------------------------
@@ -580,6 +579,7 @@ def _probe_remote_processes(running_jobs: list[dict]) -> dict[str, dict]:
 
 def cli_sim_jobs() -> int:
     """Show status of submitted Spectre simulations."""
+    _load_cli_env()
     from virtuoso_bridge.spectre.runner import read_all_jobs
 
     jobs = read_all_jobs()
@@ -669,6 +669,7 @@ def cli_sim_jobs() -> int:
 
 def cli_sim_cancel() -> int:
     """Cancel a running simulation by job ID."""
+    _load_cli_env()
     from virtuoso_bridge.spectre.runner import cancel_job
     job_id = _SIM_CANCEL_JOB_ID[0]
     if not job_id:
@@ -699,7 +700,7 @@ def _make_ssh_runner() -> "SSHRunner":
 
 def cli_dismiss_dialog() -> int:
     """Find and dismiss blocking Virtuoso GUI dialogs via X11."""
-    _load_repo_env()
+    _load_cli_env()
     from virtuoso_bridge.virtuoso import x11
     runner, user = _make_ssh_runner()
 
@@ -733,14 +734,22 @@ def build_parser() -> argparse.ArgumentParser:
         sp = subparsers.add_parser(name, help=hlp)
         sp.add_argument("-p", "--profile", default=None,
                         help="Connection profile (reads VB_*_<profile> env vars)")
-    subparsers.add_parser("sim-jobs", help="Show submitted simulation jobs")
+        sp.add_argument("--env", default=None,
+                        help="Explicit .env file path (highest priority)")
+    sp_jobs = subparsers.add_parser("sim-jobs", help="Show submitted simulation jobs")
+    sp_jobs.add_argument("--env", default=None,
+                         help="Explicit .env file path (highest priority)")
     sp_cancel = subparsers.add_parser("sim-cancel", help="Cancel a running simulation")
+    sp_cancel.add_argument("--env", default=None,
+                           help="Explicit .env file path (highest priority)")
     sp_cancel.add_argument("job_id", help="Job ID to cancel (from sim-jobs)")
 
     sp_dismiss = subparsers.add_parser(
         "dismiss-dialog", help="Find and dismiss blocking Virtuoso GUI dialogs")
     sp_dismiss.add_argument("-p", "--profile", default=None,
                             help="Connection profile")
+    sp_dismiss.add_argument("--env", default=None,
+                            help="Explicit .env file path (highest priority)")
 
     return parser
 
@@ -763,6 +772,7 @@ def main(argv: list[str] | None = None) -> int:
     profile = getattr(args, "profile", None)
     if profile is not None:
         _CLI_PROFILE[0] = profile
+    set_runtime_env_file(getattr(args, "env", None))
     job_id = getattr(args, "job_id", None)
     if job_id is not None:
         _SIM_CANCEL_JOB_ID[0] = job_id

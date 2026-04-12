@@ -7,8 +7,9 @@ They return the raw SKILL output string.
 from virtuoso_bridge import VirtuosoClient
 
 
-def _q(client: VirtuosoClient, expr: str) -> str:
-    r = client.execute_skill(expr)
+def _q(client: VirtuosoClient, expr: str, timeout: int | None = None) -> str:
+    kwargs = {"timeout": timeout} if timeout is not None else {}
+    r = client.execute_skill(expr, **kwargs)
     if r.errors:
         raise RuntimeError(f"SKILL error: {r.errors[0]}")
     return r.output or ""
@@ -222,6 +223,52 @@ def set_corner(client: VirtuosoClient, name: str, *,
     return _q(client, f'maeSetCorner("{name}"{dt}{s})')
 
 
+def setup_corner(client: VirtuosoClient, name: str, *,
+                 model_file: str = "", model_section: str = "",
+                 variables: dict[str, str] | None = None,
+                 session: str = "") -> str:
+    """Create a fully configured corner with model file and variables.
+
+    Uses maeSetCorner + maeSetVar (for corner variables) + axl* setup-DB API
+    (for model file/section). No XML editing required.
+
+    Args:
+        name: Corner name, e.g. "tt_25"
+        model_file: Path to model file, e.g. "/path/to/mypdk.scs"
+        model_section: Model section name, e.g. "tt"
+        variables: Corner-specific variables, e.g. {"temperature": "25", "vdd": "1.2"}
+        session: Maestro session ID
+    """
+    s = f' ?session "{session}"' if session else ""
+
+    # Create the corner
+    set_corner(client, name, session=session)
+
+    # Set corner-specific variables
+    if variables:
+        for var_name, var_value in variables.items():
+            _q(client,
+               f'maeSetVar("{var_name}" "{var_value}" '
+               f'?typeName "corner" ?typeValue \'("{name}"){s})')
+
+    # Set model file + section via axl* setup-DB API
+    if model_file:
+        sess_id = session or _q(client, "car(maeGetSessions())")
+        model_name = model_file.rsplit("/", 1)[-1] if "/" in model_file else model_file
+        expr = (
+            f'let((sdb corn model) '
+            f'sdb = axlGetMainSetupDB("{sess_id}") '
+            f'corn = axlGetCorner(sdb "{name}") '
+            f'model = axlPutModel(corn "{model_name}") '
+            f'axlSetModelFile(model "{model_file}") '
+            f'{f"""axlSetModelSection(model "{model_section}") """ if model_section else ""}'
+            f'model)'
+        )
+        _q(client, expr)
+
+    return name
+
+
 def load_corners(client: VirtuosoClient, filepath: str, *,
                  sections: str = "corners",
                  operation: str = "overwrite") -> str:
@@ -267,63 +314,94 @@ def set_job_policy(client: VirtuosoClient, policy, *,
     return _q(client, parts)
 
 
-def run_simulation(client: VirtuosoClient, *, session: str = "") -> str:
+def run_simulation(client: VirtuosoClient, *, session: str = "",
+                   callback: str = "") -> str:
     """maeRunSimulation — run simulation (async, returns immediately).
 
-    Returns the run name (e.g. "Interactive.1").
-    Follow with wait_until_done() to wait for completion.
+    Returns the history name (e.g. "Interactive.1").
 
-    IMPORTANT: The maestro must be opened in GUI mode (deOpenCellView +
-    maeMakeEditable) for wait_until_done to block properly. Background
-    sessions (maeOpenSetup) cause maeWaitUntilDone to return immediately,
-    and maeCloseSession will cancel any in-flight simulation.
+    Args:
+        session: session name (default: current session)
+        callback: SKILL procedure name to call when run finishes
     """
-    s = f' ?session "{session}"' if session else ""
-    return _q(client, f'maeRunSimulation({s.strip()})')
+    parts = "maeRunSimulation("
+    if session:
+        parts += f'?session "{session}" '
+    if callback:
+        parts += f'?callback "{callback}" '
+    parts = parts.rstrip() + ")"
+    return _q(client, parts)
 
 
-def wait_until_done(client: VirtuosoClient, timeout: int = 600) -> None:
-    """Wait until simulation finishes. Fully non-blocking.
+def wait_until_done(client: VirtuosoClient, timeout: int = 600,
+                    _marker: str = "") -> str:
+    """Wait for a simulation that was started with run_and_wait().
 
-    Uses axlSessionConnect to register a "runFinished" callback on the
-    current ADE session. When ALL sweep points complete, the callback writes
-    a marker file. Python polls the marker via SSH (bash -c loop).
+    Polls a marker file via SSH without blocking the SKILL channel.
+    Prefer run_and_wait() which handles everything automatically.
 
-    Zero SKILL channel blocking, zero event loop blocking → LSCS parallel.
-
-    Must be called AFTER maeRunSimulation() while a GUI session is open.
+    Args:
+        _marker: internal marker path (set by run_and_wait)
     """
-    import subprocess
+    import time as _time
 
-    marker = "/tmp/vb_sim_done_marker"
-    ssh_cmd = ["ssh", "-o",
-               f"ControlPath=/tmp/vb_ssh_{client.ssh_runner.user}@{client.ssh_runner.host}:direct",
-               f"{client.ssh_runner.user}@{client.ssh_runner.host}"]
+    if not _marker:
+        raise ValueError("No marker path. Use run_and_wait() instead.")
 
-    # Remove old marker
-    subprocess.run(ssh_cmd + [f"rm -f {marker}"],
-                   capture_output=True, timeout=10)
+    runner = client.ssh_runner
+    if runner is None:
+        raise RuntimeError("No SSH connection (tunnel not started?)")
 
-    # Disconnect old callback if any, then register new one
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        r = runner.run_command(f"cat {_marker} 2>/dev/null", timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            runner.run_command(f"rm -f {_marker}", timeout=10)
+            return r.stdout.strip()
+        _time.sleep(2)
+
+    raise TimeoutError(f"Simulation did not finish within {timeout}s")
+
+
+def run_and_wait(client: VirtuosoClient, *, session: str = "",
+                 timeout: int = 600) -> tuple[str, str]:
+    """Run simulation and wait for completion without blocking SKILL.
+
+    Uses maeRunSimulation(?callback ...) to register a completion callback
+    atomically with the simulation start — no race condition possible.
+    The callback writes a marker file; Python polls it via SSH.
+
+    The SKILL channel remains free during the wait — you can still
+    execute_skill, dismiss dialogs, take screenshots, etc.
+
+    Returns (history, status) — e.g. ('"Interactive.3"', 'done').
+    """
+    import uuid
+
+    runner = client.ssh_runner
+    if runner is None:
+        raise RuntimeError("No SSH connection (tunnel not started?)")
+
+    nonce = uuid.uuid4().hex[:8]
+    marker = f"/tmp/vb_sim_done_{nonce}"
+    runner.run_command(f"rm -f {marker}", timeout=10)
+
+    # Define callback that writes marker file when simulation finishes.
+    # Use system("echo ... > file") instead of outfile/fprintf to avoid
+    # SKILL I/O buffering issues in callback context.
     client.execute_skill(f'''
-let((s)
-  s = axlGetWindowSession(hiGetCurrentWindow())
-  errset(axlSessionDisconnect(s '_vbRunFinishedCB))
-  procedure(_vbRunFinishedCB(ses pointId runId status)
-    let((p) p = outfile("{marker}")
-      fprintf(p "%s\\n" status) close(p)
-      printf("[%s wait_until_done] %s\\n" nth(2 parseString(getCurrentTime())) status)))
-  axlSessionConnect(s "runFinished" '_vbRunFinishedCB)
-)
+procedure(_vb_sim_done_{nonce}(session runID)
+  system(sprintf(nil "echo done > {marker}"))
+  printf("[%s sim done] run %L\\n" nth(2 parseString(getCurrentTime())) runID))
 ''')
 
-    # Wait for marker via SSH bash loop (single arg, avoids csh issues)
-    r = subprocess.run(
-        ssh_cmd + [f"bash -c 'while [ ! -f {marker} ]; do sleep 1; done; cat {marker}'"],
-        capture_output=True, text=True, timeout=timeout)
+    # Start simulation with callback — atomic, no race condition
+    history = run_simulation(client, session=session,
+                             callback=f"_vb_sim_done_{nonce}")
 
-    if r.returncode != 0:
-        raise RuntimeError(f"wait_until_done SSH failed: {r.stderr}")
+    # Poll marker via SSH (SKILL channel stays free)
+    status = wait_until_done(client, timeout=timeout, _marker=marker)
+    return history, status
 
 
 # ---------------------------------------------------------------------------

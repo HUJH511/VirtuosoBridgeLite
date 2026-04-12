@@ -22,6 +22,10 @@ from virtuoso_bridge.virtuoso.maestro import open_session, close_session, read_c
 
 **Use background for read/write config. Use GUI for simulation.**
 
+## Standard Simulation Flow
+
+See **[simulation-flow.md](simulation-flow.md)** for the complete 8-step guide (clean sessions → open GUI → run → read results), common pitfalls, and optimization loop patterns.
+
 ## Session Management
 
 `maestro/session.py`
@@ -214,11 +218,22 @@ set_sim_option(client, "TRAN2", '(("temp" "85"))')
 
 | Python | SKILL | Description |
 |--------|-------|-------------|
-| `set_corner(client, name, *, disable_tests="", session="")` | `maeSetCorner` | Create/modify corner |
+| `set_corner(client, name, *, disable_tests="", session="")` | `maeSetCorner` | Create/modify corner (empty) |
+| `setup_corner(client, name, *, model_file="", model_section="", variables={}, session="")` | `maeSetCorner` + `maeSetVar` + `axl*` | **Recommended.** Create fully configured corner with model file, section, and variables — no XML editing |
 | `load_corners(client, filepath, *, sections="corners", operation="overwrite")` | `maeLoadCorners` | Load corners from CSV |
 
 ```python
+# Create a fully configured corner (recommended)
+setup_corner(client, "tt_25",
+             model_file="/path/to/mypdk.scs",
+             model_section="tt",
+             variables={"temperature": "25", "vdd": "1.2"},
+             session=session)
+
+# Create empty corner only
 set_corner(client, "myCorner", disable_tests='("AC" "TRAN")')
+
+# Load corners from CSV
 load_corners(client, "my_corners.csv")
 ```
 
@@ -239,12 +254,17 @@ set_job_control_mode(client, "Local")
 
 | Python | SKILL | Description |
 |--------|-------|-------------|
-| `run_simulation(client, *, session="")` | `maeRunSimulation` | Run (async) |
-| `wait_until_done(client, timeout=300)` | `maeWaitUntilDone` | Block until done |
+| `run_simulation(client, *, session="", callback="")` | `maeRunSimulation` | Run (async), returns history name |
+| `wait_until_done(client, timeout=600, _marker="")` | SSH poll | Wait for marker file (used by `run_and_wait`) |
+| `run_and_wait(client, *, session="", timeout=600)` | `maeRunSimulation(?callback ...)` + SSH poll | **Recommended.** Run + wait without blocking SKILL channel |
 
 ```python
-run_simulation(client)
-wait_until_done(client, timeout=600)
+# Recommended: run_and_wait (no race condition, SKILL stays free)
+history, status = run_and_wait(client, session=session, timeout=600)
+
+# Or manual two-step (if you need custom callback):
+# history = run_simulation(client, session=session)
+# ... SKILL channel is free, do other work ...
 ```
 
 ## Write — Export

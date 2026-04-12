@@ -321,4 +321,5 @@ def export_waveform(
         f'?output "{remote_path}")')
 
     client.download_file(remote_path, local_path)
+    client.execute_skill(f'deleteFile("{remote_path}")')
     return local_path
