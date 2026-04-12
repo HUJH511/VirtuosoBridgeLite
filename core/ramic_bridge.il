@@ -12,7 +12,11 @@ RBPython = if(getShellEnvVar("RB_PYTHON_PATH") then
             else
                 "python"
             )
-RBPort = 65432
+RBPort = if(getShellEnvVar("RB_PORT") then
+                atoi(getShellEnvVar("RB_PORT"))
+            else
+                65432
+            )
 
 procedure(RBIpcDataHandler(ipcId data)
   let((result)
