@@ -36,8 +36,10 @@ procedure(RBStart()
   else
     ; Use "env -u" to strip Virtuoso's LD_LIBRARY_PATH / LD_PRELOAD
     ; so the system Python links against its own libs.
+    ; Use "stdbuf -oL" to force line-buffered stdout so ipcBeginProcess
+    ; receives complete lines without waiting for Python's buffer to fill.
     RBIpc = ipcBeginProcess(
-      sprintf(nil "/usr/bin/env -u LD_LIBRARY_PATH -u LD_PRELOAD %s %L %s %d"
+      sprintf(nil "/usr/bin/env -u LD_LIBRARY_PATH -u LD_PRELOAD stdbuf -oL %s -u %L %s %d"
         RBPython RBDPath "127.0.0.1" RBPort)
       "" 'RBIpcDataHandler nil 'RBIpcFinishHandler "")
     printf("[RAMIC] started on port %d\n" RBPort)
