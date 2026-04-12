@@ -220,7 +220,14 @@ class SSHClient:
 
     @property
     def port(self) -> int:
-        """Local port that VirtuosoClient should connect to."""
+        """Port that VirtuosoClient should connect to.
+
+        In local mode there is no SSH tunnel, so the client connects
+        directly to the daemon port.  In remote mode the client connects
+        to the local end of the SSH tunnel.
+        """
+        if _is_localhost(self._remote_host):
+            return self._port
         return self._local_port
 
     @property
@@ -498,7 +505,7 @@ class SSHClient:
         tunnel_pid = None if is_local else self._ssh_runner.tunnel_pid
         state = {
             "mode": "local" if is_local else "remote",
-            "port": self._local_port,
+            "port": self._port if is_local else self._local_port,
             "tunnel_pid": tunnel_pid,
             "remote_host": self._remote_host,
             "setup_path": self._remote_virtuoso_setup_path,
