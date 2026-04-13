@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""RAMIC Bridge Daemon — TCP-to-Virtuoso IPC relay with callback socket.
+"""RAMIC Bridge Daemon — TCP-to-Virtuoso IPC relay with result file.
 
 Launched by Virtuoso's ipcBeginProcess(). Receives SKILL commands over TCP
 (port N), writes them to stdout (→ Virtuoso). Results are received via a
-callback socket (port N+1) instead of stdin, which avoids issues where the
-ipcBeginProcess data handler stops firing after the first invocation on
-certain Virtuoso/platform combinations (see issue #37).
+temp file written by the SKILL-side RBSendCallback, which avoids both the
+unreliable ipcBeginProcess data handler re-entry (issue #37) and shell
+injection risks from system() calls.
 
 Usage (called by ramic_bridge.il, not manually):
     python ramic_daemon.py 127.0.0.1 65432
@@ -14,58 +14,65 @@ Usage (called by ramic_bridge.il, not manually):
 import sys
 import socket
 import os
-import fcntl
 import json
-import errno
 import time
 import re
+import atexit
 
 HOST = sys.argv[1]
 PORT = int(sys.argv[2])
 
-# Non-blocking stdin (Virtuoso's IPC pipe) — kept for compatibility
-fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL,
-            fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
-
 STX = b'\x02'  # start-of-result (success)
 NAK = b'\x15'  # start-of-result (error)
-RS  = b'\x1e'  # end-of-result
 
-
-# Callback socket: Virtuoso sends results here instead of via stdin pipe
+# Result file: Virtuoso writes results here instead of via stdin pipe.
+# Port+1 is used in the filename to match the SKILL-side convention.
 CALLBACK_PORT = PORT + 1
-_cb_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-_cb_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-_cb_server.bind((HOST, CALLBACK_PORT))
-_cb_server.listen(1)
-_cb_server.settimeout(60)
+_RESULT_FILE = "/tmp/.ramic_cb_{}".format(CALLBACK_PORT)
+_DONE_FILE = "/tmp/.ramic_cb_{}.done".format(CALLBACK_PORT)
 
 
-def read_result():
-    """Read result from Virtuoso via callback socket.
+def _clear_result_files():
+    """Remove stale result files before sending a new command."""
+    for path in (_RESULT_FILE, _DONE_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
-    The SKILL-side RBIpcDataHandler evaluates the expression and sends
-    the result back as 'OK <value>' or 'ERR <msg>' over a TCP connection
-    to the callback port.
+
+def _cleanup_on_exit():
+    """Remove result files when daemon exits."""
+    _clear_result_files()
+
+
+atexit.register(_cleanup_on_exit)
+
+
+def read_result(timeout=30):
+    """Poll for result file written by Virtuoso's RBSendCallback.
+
+    The SKILL side writes the result to _RESULT_FILE, then creates
+    _DONE_FILE as a completion marker.  This two-phase approach prevents
+    reading a partially-written data file.
     """
-    try:
-        conn, _ = _cb_server.accept()
-        data = b""
-        while True:
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-        conn.close()
-        text = data.decode('utf-8', errors='replace').strip()
-        if text.startswith("OK "):
-            return STX + text[3:].encode('utf-8')
-        elif text.startswith("ERR "):
-            return NAK + text[4:].encode('utf-8')
-        else:
-            return STX + text.encode('utf-8')
-    except socket.timeout:
-        return NAK + b"timeout waiting for Virtuoso callback"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(_DONE_FILE):
+            try:
+                with open(_RESULT_FILE) as f:
+                    text = f.read().strip()
+                _clear_result_files()
+                if text.startswith("OK "):
+                    return STX + text[3:].encode('utf-8')
+                elif text.startswith("ERR "):
+                    return NAK + text[4:].encode('utf-8')
+                else:
+                    return NAK + b"malformed callback: " + text.encode('utf-8')
+            except IOError:
+                pass
+        time.sleep(0.01)
+    return NAK + b"timeout waiting for Virtuoso callback"
 
 
 _BLOCKED_FNS = re.compile(
@@ -74,6 +81,10 @@ _BLOCKED_FNS = re.compile(
 
 
 _SKIP_CHECK = os.environ.get("RB_UNSAFE", "").lower() in ("1", "true", "yes")
+
+if _SKIP_CHECK:
+    print("[RAMIC] WARNING: RB_UNSAFE is enabled — SKILL safety checks are disabled",
+          file=sys.stderr, flush=True)
 
 
 def _check_skill(skill: str) -> None:
@@ -108,16 +119,20 @@ def handle(conn):
 
     _check_skill(skill)
 
+    # Clear stale result files before sending the new command
+    _clear_result_files()
+
     # Send SKILL to Virtuoso (newline required — ipcBeginProcess is line-based)
     sys.stdout.write(skill + '\n')
     sys.stdout.flush()
 
-    # Read result via callback socket
-    result = read_result()
+    # Read result via file polling (timeout from client request, default 30s)
+    result = read_result(timeout=req.get("timeout", 30))
     conn.sendall(result)
 
 
 def main():
+    _clear_result_files()  # clean slate on startup
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((HOST, PORT))
