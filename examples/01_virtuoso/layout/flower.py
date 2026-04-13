@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Draw a flower in Virtuoso layout using polygons."""
+"""Draw a flower in Virtuoso layout using polygons.
+
+Usage::
+
+    python flower.py <LIB>
+
+    <LIB> is required — the Virtuoso library where the cell "flower"
+    will be created.  Example::
+
+        python flower.py testlib
+
+    Running this script from VSCode without passing <LIB> will NOT work:
+    the script will exit with a clear error, and Virtuoso will show nothing.
+
+Prerequisites:
+  - virtuoso-bridge service running (virtuoso-bridge start)
+
+Customize the LAYER constants below to match your PDK metal stack.
+"""
 
 from __future__ import annotations
 
@@ -17,10 +35,6 @@ from virtuoso_bridge.virtuoso.layout.ops import (
     layout_fit_view as fit_view,
 )
 
-if len(sys.argv) < 2:
-    print(f"Usage: python {Path(__file__).name} <LIB>")
-    raise SystemExit(1)
-LIB = sys.argv[1]
 CELL = "flower"
 
 N_PETALS = 8
@@ -29,12 +43,26 @@ PETAL_B = 1.2    # semi-minor axis (petal width), um
 PETAL_D = 3.2    # petal center distance from origin, um
 CENTER_R = 1.8   # center circle radius, um
 
-# Alternate two layers for petals so adjacent ones contrast in color
+# ----------------------------------------------------------------------
+# Customize to match your PDK metal stack
+# ----------------------------------------------------------------------
+# Alternate two layers for petals so adjacent ones contrast in color.
+# All layers listed here must be defined in your PDK techfile.
 PETAL_LAYERS = [("M3", "drawing"), ("M4", "drawing")]
 CENTER_LAYER = ("M5", "drawing")
 STEM_LAYER   = ("M1", "drawing")
 LEAF_LAYER   = ("M2", "drawing")
 LABEL_LAYER  = ("M1", "pin")
+
+# Available font names: "roman", "default", "times", "courier",
+# "helvetica", "symbol", etc.  "roman" is the safest cross-PDK choice.
+FONT = "roman"
+# ----------------------------------------------------------------------
+
+
+def _die(message: str) -> None:
+    print(f"[ERROR] {message}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 def ellipse_pts(
@@ -51,10 +79,47 @@ def ellipse_pts(
 
 
 def main() -> int:
-    client = VirtuosoClient.from_env()
-    print(f"[Flower] Creating '{CELL}' in '{LIB}' ...")
+    # ------------------------------------------------------------------
+    # Argument check — this script MUST be run with a library argument.
+    # Clicking "Run" in VSCode without passing <LIB> will silently do
+    # nothing in Virtuoso, so we abort with a clear message instead.
+    # ------------------------------------------------------------------
+    if len(sys.argv) < 2:
+        print("=" * 60, file=sys.stderr)
+        print(" ERROR: missing required argument <LIB>", file=sys.stderr)
+        print()
+        print(
+            f" Usage: python {Path(__file__).name} <LIB>\n"
+            " Example: python flower.py lifangshi\n",
+            file=sys.stderr,
+        )
+        print(
+            " NOTE: Running this script from VSCode (Ctrl+F5 / F5) will NOT\n"
+            "       work — VSCode does not pass command-line arguments by default.\n"
+            "       Either run from a terminal, configure a launch.json, or\n"
+            "       edit the PDK values in this file directly.\n",
+            file=sys.stderr,
+        )
+        print(
+            " If Virtuoso shows a blank cell after running, check that:\n"
+            "   1. <LIB> is a library that exists in your Virtuoso setup\n"
+            "   2. All *LAYER constants match your PDK techfile layers\n",
+            file=sys.stderr,
+        )
+        print("=" * 60, file=sys.stderr)
+        return 1
 
-    with client.layout.edit(LIB, CELL, mode="w") as layout:
+    lib = sys.argv[1]
+
+    client = VirtuosoClient.from_env()
+    print(f"[Flower] Creating '{CELL}' in '{lib}' ...")
+    print(f"  Layer (petals) : {[p[0] for p in PETAL_LAYERS]}")
+    print(f"  Layer (stem)   : {STEM_LAYER[0]}")
+    print(f"  Layer (label)  : {LABEL_LAYER[0]}")
+    print(f"  Font           : {FONT}")
+    print()
+
+    with client.layout.edit(lib, CELL, mode="w") as layout:
 
         # -- Petals ----------------------------------------------------------------
         for i in range(N_PETALS):
@@ -81,12 +146,13 @@ def main() -> int:
         layout.add(polygon(*LEAF_LAYER, leaf_r))
 
         # -- Label -----------------------------------------------------------------
-        layout.add(label(*LABEL_LAYER, 0.0, -16.2, "FLOWER", "centerLeft", "R0", "default", 0.6))
+        layout.add(label(*LABEL_LAYER, 0.0, -16.2, "FLOWER", "centerLeft", "R0", FONT, 0.6))
 
         layout.add(fit_view())
 
-    client.open_window(LIB, CELL, view="layout")
-    print("[Done] Flower layout created and opened.")
+    client.open_window(lib, CELL, view="layout")
+    print("[Done] Flower layout created — check the Virtuoso window.")
+    print("       If the cell is blank, verify all *LAYER constants above.")
     return 0
 
 
