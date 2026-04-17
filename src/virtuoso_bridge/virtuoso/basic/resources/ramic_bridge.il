@@ -111,12 +111,21 @@ procedure(RBStop()
 
 procedure(RBStopAll()
     ; Emergency function to kill all RAMIC Bridge daemon processes
-    ; 1. Try graceful SIGTERM first, then force SIGKILL after 2s
-    ; 2. Also kill any process holding the configured RBPort
-    ; 3. Reset Skill-side IPC state
-    sh(sprintf(nil "pgrep -f 'python.*ramic_bridge_daemon' | xargs -r kill 2>/dev/null; sleep 2; pgrep -f 'python.*ramic_bridge_daemon' | xargs -r kill -9 2>/dev/null; fuser -k %d/tcp 2>/dev/null" RBPort))
+    ; 1. Release Virtuoso's IPC bookkeeping for the live handle (if any)
+    ; 2. Match daemon by script filename (ramic_bridge_daemon_[23]),
+    ;    not by interpreter name -- works with pypy, conda pythons, etc.
+    ; 3. SIGTERM, wait 2s, then SIGKILL holdouts
+    ; 4. Free the port: fuser if available, otherwise surface the holder
+    ;    via ss/lsof so the user can see what to kill
+    ; 5. Reset Skill-side IPC state and stderr buffer
+    if(boundp('RBIpc) && RBIpc != 'unbound then
+        errset(ipcKillProcess(RBIpc)))
+    sh(sprintf(nil
+        "pgrep -f 'ramic_bridge_daemon_[23]' | xargs -r kill; sleep 2; pgrep -f 'ramic_bridge_daemon_[23]' | xargs -r kill -9; if command -v fuser >/dev/null 2>&1; then fuser -k %d/tcp 2>/dev/null; elif command -v ss >/dev/null 2>&1; then ss -tlnp 2>/dev/null | awk -v p=%d '$4 ~ \":\"p\"$\"' >&2; elif command -v lsof >/dev/null 2>&1; then lsof -iTCP:%d -sTCP:LISTEN >&2; fi"
+        RBPort RBPort RBPort))
     RBIpc = 'unbound
-    printf("[RAMIC Bridge] RBStopAll: all daemon processes killed, port %d released\n" RBPort)
+    RBStderrBuf = ""
+    printf("[RAMIC Bridge] RBStopAll: kill issued; verify with: ss -tlnp | grep %d (or lsof -iTCP:%d)\n" RBPort RBPort)
 )
 
 ; ============================================================================
