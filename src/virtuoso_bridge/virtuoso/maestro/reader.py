@@ -539,7 +539,12 @@ def read_outputs(client: VirtuosoClient, session: str,
 _MAE_TITLE_RE = re.compile(
     r"Assembler\s+(Editing|Reading):\s+(\S+)\s+(\S+)\s+([^\s*]+)(\*?)\s*$"
 )
-_INTERACTIVE_RE = re.compile(r"^(Interactive|MonteCarlo)\.[0-9]+(?:\.rdb)?$")
+# A history is anchored by its .rdb metadata file (any user-given name, any
+# suffix like Interactive.0.RO, closeloop_PVT_postsim, etc.).  We also accept
+# a bare directory whose name looks like a history — some setups store the
+# actual history data dir alongside metadata, some don't.
+_HISTORY_RDB_RE = re.compile(r"^(?!\.)[^/\\]+\.rdb$")   # <name>.rdb, no dirs
+_HISTORY_DIR_RE = re.compile(r"^(Interactive|MonteCarlo)\.[0-9]+(?:\.[A-Z]{2,4})?$")
 _CANONICAL_SDB_RE = re.compile(r"^[^.]+\.sdb$")   # e.g. maestro.sdb, maestro_MC.sdb
 
 
@@ -721,18 +726,27 @@ def read_session_info(client: VirtuosoClient, session: str) -> dict:
                 # sdb files: strict canonical names only, no .cdslck/.old/.bak
                 sdb_files = [f for f in view_dir_files if _CANONICAL_SDB_RE.match(f)]
 
-                # histories: Interactive.N or Interactive.N.rdb → dedupe on bare name
+                # Histories can be any user-given name (e.g. closeloop_PVT_postsim),
+                # with or without a system suffix (.RO, etc.).  We anchor on
+                # the <name>.rdb metadata file and also accept bare dir names
+                # that look like system-generated histories.
                 seen: set[str] = set()
                 for h in hist_dir_files:
-                    mm = _INTERACTIVE_RE.match(h)
-                    if mm:
-                        bare = h[:-4] if h.endswith(".rdb") else h
-                        seen.add(bare)
-                history_list = sorted(
-                    seen,
-                    key=lambda h: int(h.rsplit(".", 1)[-1])
-                    if h.rsplit(".", 1)[-1].isdigit() else -1
-                )
+                    if _HISTORY_RDB_RE.match(h):
+                        seen.add(h[:-4])           # strip .rdb
+                    elif _HISTORY_DIR_RE.match(h):
+                        seen.add(h)
+
+                # Natural sort: numbers inside names sort numerically so
+                # Interactive.2 < Interactive.10.  Named histories
+                # (closeloop_PVT_postsim) sort alphabetically among peers.
+                def _natkey(s: str):
+                    return [
+                        (int(tok) if tok.isdigit() else 0, tok)
+                        for tok in re.findall(r"\d+|\D+", s)
+                    ]
+
+                history_list = sorted(seen, key=_natkey)
 
     # Pick the sdb: prefer "{view}.sdb" (OA convention), else first strict match.
     sdb_name = ""
