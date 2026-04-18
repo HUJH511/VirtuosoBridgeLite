@@ -9,7 +9,6 @@ from virtuoso_bridge import VirtuosoClient
 
 from ._compact import (
     _compact_corners,
-    _compact_outputs,
     _compact_session_info,
     _compact_sim_options,
     _compact_status,
@@ -383,7 +382,7 @@ def snapshot(client: VirtuosoClient, *,
             # "output_defs" = Output *definitions* (from maeGetTestOutputs).
             # "output_values" (below, optional) = the scalars those defs
             # evaluate to after a run (from maeGetOutputValue).
-            "output_defs": _compact_outputs(outputs),
+            "output_defs": outputs,
 
             # --- Process / corners -------------------------------------
             "corners_enabled": corners_enabled,

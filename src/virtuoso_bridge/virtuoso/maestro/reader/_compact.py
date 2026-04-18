@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 
 # Sim options worth reporting; everything else is Cadence defaults / noise.
 _SIM_OPTIONS_KEEP = {
@@ -27,92 +25,18 @@ def _extract_models(env_opts: dict) -> list[dict]:
     return result
 
 
-# Waveform-accessor prefixes that map 1:1 to a Spectre analysis.  Order
-# matters only where a longer prefix must be matched before a shorter one
-# (e.g. VDC before V).
-_WAVEFORM_ANALYSIS_PREFIXES = (
-    ("VOP(", "dcOp"),
-    ("IOP(", "dcOp"),
-    ("VDC(", "dc"),
-    ("IDC(", "dc"),
-    ("VS(",  "dc"),
-    ("IS(",  "dc"),
-    ("VT(",  "tran"),
-    ("IT(",  "tran"),
-    ("VF(",  "ac"),
-    ("IF(",  "ac"),
-)
-
-_RESULT_NAME_RE = re.compile(r'\?result\s+"([^"]+)"')
-
-
-def _infer_analysis_from_expr(expr) -> str | None:
-    """Map a SKILL output expression to its source analysis name.
-
-    Preference order:
-      1. An explicit ``?result "NAME"`` argument (e.g. ``stb`` /
-         ``stb_margin`` / ``pnoise`` — any non-default results bucket).
-      2. Waveform accessor prefixes (VF/IF → ac, VT/IT → tran, etc.).
-
-    Returns None when the expression gives no reliable signal.
-    """
-    if not expr or not isinstance(expr, str):
-        return None
-    m = _RESULT_NAME_RE.search(expr)
-    if m:
-        return m.group(1)
-    for prefix, ana in _WAVEFORM_ANALYSIS_PREFIXES:
-        if prefix in expr:
-            return ana
-    return None
-
-
-def _compact_outputs(outs: list) -> list:
-    """Drop null / empty fields from each output dict.
-
-    Adds a derived ``analysis`` tag to computed outputs (from the
-    expression), so downstream tooling can locate the source PSF without
-    re-parsing the SKILL expression.
-    """
-    result = []
-    for o in outs:
-        kind = o.get("category") or "unknown"
-        cleaned = {"kind": kind}
-        for k in ("name", "expr", "signal", "type", "plot", "save",
-                  "unit", "spec", "eval_type"):
-            v = o.get(k)
-            if v is not None and v != "" and v != []:
-                cleaned[k] = v
-        if kind == "computed":
-            ana = _infer_analysis_from_expr(cleaned.get("expr"))
-            if ana:
-                cleaned["analysis"] = ana
-        result.append(cleaned)
-    return result
-
-
 def _compact_corners(corners: dict) -> tuple[list, dict]:
-    """Split corners into (enabled_names, enabled_with_detail)."""
+    """Return (enabled_names, all_corners_detail).
+
+    The detail dict keeps every corner (both enabled and disabled) and
+    every model inside each corner (same) — the caller should filter if
+    they want only what will run.  Deciding that up-here throws away the
+    distinction between ``configured`` and ``enabled``, which matters for
+    diagnosis.  ``corners_enabled`` gives the shortcut list for the common
+    case.
+    """
     enabled = [k for k, v in corners.items() if v.get("enabled")]
-    detail: dict = {}
-    for name, c in corners.items():
-        if not c.get("enabled"):
-            continue
-        clean = {}
-        if c.get("temperature"):
-            clean["temperature"] = c["temperature"]
-        if c.get("vars"):
-            clean["vars"] = c["vars"]
-        if c.get("parameters"):
-            clean["parameters"] = c["parameters"]
-        models_on = [m for m in (c.get("models") or []) if m.get("enabled")]
-        if models_on:
-            clean["models"] = [
-                {"file": m["file"], "section": m["section"]} for m in models_on
-            ]
-        if clean:
-            detail[name] = clean
-    return enabled, detail
+    return enabled, corners
 
 
 def _compact_session_info(info: dict) -> dict:
