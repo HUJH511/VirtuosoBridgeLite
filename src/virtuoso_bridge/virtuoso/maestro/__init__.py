@@ -21,6 +21,7 @@ from virtuoso_bridge.virtuoso.maestro.reader import (
     read_status,
     parse_corners_xml,
     parse_tests_from_sdb_xml,
+    parse_variables_from_sdb_xml,
     detect_session_for_focus,
     snapshot,
 )
@@ -89,6 +90,7 @@ __all__ = [
     "read_status",
     "parse_corners_xml",
     "parse_tests_from_sdb_xml",
+    "parse_variables_from_sdb_xml",
     "detect_session_for_focus",
     "snapshot",
     # write - test

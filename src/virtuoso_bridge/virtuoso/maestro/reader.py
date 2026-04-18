@@ -389,12 +389,27 @@ def read_remote_file(client: VirtuosoClient, path: str, *,
                 pass
 
 
-def read_variables(client: VirtuosoClient, session: str) -> dict[str, str]:
+def read_variables(client: VirtuosoClient, session: str, *,
+                   sdb_path: str | None = None,
+                   local_sdb_path: str | None = None,
+                   reuse_local: bool = False) -> dict[str, str]:
     """Read design variables with values.
 
-    ``maeGetSetup(?typeName "variables")`` returns nil in many PDKs; this
-    function uses the ``asi*`` API which works reliably.
+    Prefers parsing ``maestro.sdb`` XML (works for both ADE Assembler and
+    Explorer, no dependence on ``asiGetCurrentSession``'s shifting state).
+    Falls back to ``asiGetDesignVarList`` only if the sdb path is unknown.
     """
+    if sdb_path:
+        xml_text = read_remote_file(
+            client, sdb_path,
+            local_path=local_sdb_path, reuse_if_exists=reuse_local,
+        )
+        vars_ = parse_variables_from_sdb_xml(xml_text)
+        if vars_:
+            return vars_
+
+    # Fallback: ask asi* (may return wrong session's vars when the ADE
+    # current session differs from the maestro session we want).
     r = client.execute_skill('asiGetDesignVarList(asiGetCurrentSession())')
     pairs = _parse_pair_alist(r.output or "")
     if pairs:
@@ -812,6 +827,53 @@ def read_session_info(client: VirtuosoClient, *,
     }
 
 
+def parse_variables_from_sdb_xml(xml_text: str) -> dict[str, str]:
+    """Extract variables from a ``maestro.sdb`` XML payload.
+
+    Returns a flat ``name -> value`` dict.  Merges:
+
+      - ``<active><vars>`` (global, typical for ADE Assembler)
+      - ``<active><tests><test><tooloptions><vars>`` (per-test, typical
+        for ADE Explorer which has exactly one test per cellview)
+
+    Globals take precedence on name collisions.  This mirrors the flat
+    view the user sees in the Variables panel.
+
+    Pure function — does no I/O.  Returns ``{}`` on parse error.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+
+    result: dict[str, str] = {}
+    for active in root.findall("active"):
+        # Per-test vars first; globals overwrite below.
+        # <vars> is a direct child of <test> (sibling of <tooloptions>).
+        tests_elem = active.find("tests")
+        if tests_elem is not None:
+            for test in tests_elem.findall("test"):
+                vars_e = test.find("vars")
+                if vars_e is None:
+                    continue
+                for v in vars_e.findall("var"):
+                    name = (v.text or "").strip()
+                    if name and name not in result:
+                        result[name] = v.findtext("value", "").strip()
+
+        # Global vars under <active> directly
+        vars_elem = active.find("vars")
+        if vars_elem is not None:
+            for v in vars_elem.findall("var"):
+                name = (v.text or "").strip()
+                if name:
+                    result[name] = v.findtext("value", "").strip()
+
+    return result
+
+
 def parse_tests_from_sdb_xml(xml_text: str) -> set[str]:
     """Extract declared test names from a ``maestro.sdb`` XML payload.
 
@@ -1099,7 +1161,12 @@ def snapshot(client: VirtuosoClient, *,
         "status": read_status(client, sess) if sess else {},
         "config": read_config(client, sess) if sess else {},
         "env": read_env(client, sess) if sess else {},
-        "variables": read_variables(client, sess) if sess else {},
+        "variables": read_variables(
+            client, sess,
+            sdb_path=info.get("sdb_path") or None,
+            local_sdb_path=sdb_cache_path,
+            reuse_local=True,
+        ) if sess else {},
         "outputs": read_outputs(client, sess) if sess else [],
         "corners": read_corners(
             client, sess,
