@@ -323,3 +323,585 @@ def export_waveform(
     client.download_file(remote_path, local_path)
     client.execute_skill(f'deleteFile("{remote_path}")')
     return local_path
+
+
+# =============================================================================
+# Extended readers (2026-04): structured snapshots, session info, corner XML
+# =============================================================================
+
+def _parse_skill_str_list(raw: str) -> list[str]:
+    """Parse a flat SKILL list of strings like ("a" "b" "c") -> ['a','b','c']."""
+    if not raw:
+        return []
+    s = raw.strip()
+    if s in ("", "nil"):
+        return []
+    return re.findall(r'"([^"]*)"', s)
+
+
+def _parse_pair_alist(raw: str) -> list[tuple[str, str]]:
+    """Parse a SKILL alist like (("k" "v") ...) into list of (k,v) tuples.
+
+    Only extracts pairs whose both elements are simple double-quoted strings.
+    """
+    if not raw:
+        return []
+    return re.findall(r'\("([^"]*)"\s+"([^"]*)"\)', raw)
+
+
+def read_remote_file(client: VirtuosoClient, path: str, *,
+                     local_path: str | None = None,
+                     encoding: str = "utf-8",
+                     reuse_if_exists: bool = False) -> str:
+    """Download a remote file and return its decoded text.
+
+    If ``local_path`` is None a temp file is used and deleted afterward.
+
+    When ``reuse_if_exists=True`` and ``local_path`` already exists on disk,
+    the file is read directly without issuing a scp — useful for saving
+    repeat round-trips within one session.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    if (local_path and reuse_if_exists
+            and Path(local_path).exists()
+            and Path(local_path).stat().st_size > 0):
+        return Path(local_path).read_text(encoding=encoding, errors="replace")
+
+    tmp_file = None
+    if local_path:
+        dest = Path(local_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+        dest = Path(tmp_file.name)
+        tmp_file.close()
+    try:
+        client.download_file(path, str(dest))
+        return dest.read_text(encoding=encoding, errors="replace")
+    finally:
+        if tmp_file is not None:
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+
+
+def read_variables(client: VirtuosoClient, session: str) -> dict[str, str]:
+    """Read design variables with values.
+
+    ``maeGetSetup(?typeName "variables")`` returns nil in many PDKs; this
+    function uses the ``asi*`` API which works reliably.
+    """
+    r = client.execute_skill('asiGetDesignVarList(asiGetCurrentSession())')
+    pairs = _parse_pair_alist(r.output or "")
+    if pairs:
+        return dict(pairs)
+    r = client.execute_skill(
+        f'maeGetSetup(?session "{session}" ?typeName "variables")')
+    return dict(_parse_pair_alist(r.output or ""))
+
+
+_OUTPUT_FIELDS = ("name", "type", "signal", "expr",
+                  "plot", "save", "eval_type", "unit", "spec")
+
+
+def _parse_sev_outputs(raw: str) -> list[dict]:
+    """Parse the flat nested list produced from expanding maeGetTestOutputs.
+
+    Input looks like ``((f1 f2 ... fN) (...) ...)``.  Each token is a quoted
+    string, ``nil``, ``t``, a number, or a raw SKILL expression (parens).
+    """
+    s = (raw or "").strip()
+    if not s or s == "nil":
+        return []
+    if s.startswith("("):
+        s = s[1:]
+    if s.endswith(")"):
+        s = s[:-1]
+
+    groups: list[str] = []
+    depth = 0
+    start = -1
+    in_str = False
+    for i, ch in enumerate(s):
+        if ch == '"' and (i == 0 or s[i - 1] != "\\"):
+            in_str = not in_str
+        if in_str:
+            continue
+        if ch == "(":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                groups.append(s[start:i + 1])
+                start = -1
+
+    def tokenize(group: str) -> list:
+        """One s-expr item = contiguous run until depth-0 whitespace.
+
+        A SKILL expression like ``dB20(((VF("/VOUTP") - ...)))`` is one token
+        even though it contains spaces and parens — the top-level scanner
+        ignores whitespace while inside quotes or balanced parens.
+        """
+        inner = group.strip()[1:-1]
+        tokens: list = []
+        i = 0
+        n = len(inner)
+        while i < n:
+            while i < n and inner[i].isspace():
+                i += 1
+            if i >= n:
+                break
+            start = i
+            depth = 0
+            in_str = False
+            while i < n:
+                ch = inner[i]
+                if in_str:
+                    if ch == '"' and inner[i - 1] != "\\":
+                        in_str = False
+                    i += 1
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        break  # unmatched — shouldn't happen
+                    depth -= 1
+                elif ch.isspace() and depth == 0:
+                    break
+                i += 1
+            tok = inner[start:i]
+            stripped = tok.strip()
+            if stripped == "nil":
+                tokens.append(None)
+            elif stripped == "t":
+                tokens.append(True)
+            elif stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
+                tokens.append(stripped[1:-1])
+            else:
+                tokens.append(stripped)
+        return tokens
+
+    entries = []
+    for g in groups:
+        toks = tokenize(g)
+        while len(toks) < len(_OUTPUT_FIELDS):
+            toks.append(None)
+        entry = dict(zip(_OUTPUT_FIELDS, toks[:len(_OUTPUT_FIELDS)]))
+        expr = entry.get("expr")
+        entry["category"] = "computed" if expr and expr != "nil" else "save-only"
+        entries.append(entry)
+    return entries
+
+
+def read_outputs(client: VirtuosoClient, session: str,
+                 test: str | None = None) -> list[dict]:
+    """Read test outputs with expanded metadata.
+
+    Returns a list of dicts.  Each dict has:
+      name:        str or None (None for save-only / signal-only entries)
+      type:        "net" / "terminal" / None
+      signal:      signal path (for save-only entries)
+      expr:        the computed SKILL expression (for named outputs)
+      plot:        True if plotted in results view
+      save:        True if saved to waveform DB
+      eval_type:   "point" / "range" / None
+      unit:        y-axis unit label or None
+      spec:        raw spec handle string (sevSpec@0x... / nil)
+      category:    "computed" or "save-only" (derived from expr)
+    """
+    if test is None:
+        test = _get_test(client, session)
+    if not test:
+        return []
+    expr = (
+        f'let((outs result) '
+        f'outs = maeGetTestOutputs("{test}" ?session "{session}") '
+        f'result = list() '
+        f'foreach(o outs '
+        f'  result = append1(result '
+        f'    list(o~>name o~>type o~>signal o~>expression '
+        f'         o~>plot o~>save o~>evalType o~>yaxisUnit o~>spec))) '
+        f'result)'
+    )
+    r = client.execute_skill(expr)
+    return _parse_sev_outputs(r.output or "")
+
+
+_MAE_TITLE_RE = re.compile(r"Assembler\s+Editing:\s+(\S+)\s+(\S+)\s+maestro\b")
+_INTERACTIVE_RE = re.compile(r"^(Interactive|MonteCarlo)\.[0-9]+(?:\.rdb)?$")
+_SKILL_4TUPLE_RE = re.compile(
+    r'\("([^"]*)"\s+"([^"]*)"\s+"([^"]*)"\s+"([^"]*)"\)'
+)
+
+
+def read_session_info(client: VirtuosoClient, session: str) -> dict:
+    """Read maestro session metadata: lib/cell/view, sdb path, results dir, histories.
+
+    Performs at most two SKILL round-trips:
+      1. window names + test list           (independent of lib/cell)
+      2. lib path + history list + dirs     (depend on parsed lib/cell)
+
+    Falls back to a third call only if the maestro title is not parseable.
+    """
+    # --- Round 1: window names + test list -----------------------------------
+    r = client.execute_skill(
+        f'list(mapcar(lambda((w) hiGetWindowName(w)) hiGetWindowList()) '
+        f'maeGetSetup(?session "{session}"))'
+    )
+    raw = r.output or ""
+
+    # The outer list has exactly two sublists; split them at the top level.
+    names: list[str] = []
+    tests_raw = ""
+    depth = 0
+    chunks: list[str] = []
+    start = -1
+    in_str = False
+    body = raw.strip()
+    if body.startswith("(") and body.endswith(")"):
+        body = body[1:-1]
+    for i, ch in enumerate(body):
+        if ch == '"' and (i == 0 or body[i - 1] != "\\"):
+            in_str = not in_str
+        if in_str:
+            continue
+        if ch == "(":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                chunks.append(body[start:i + 1])
+                start = -1
+    if len(chunks) >= 1:
+        names = _parse_skill_str_list(chunks[0])
+    if len(chunks) >= 2:
+        tests_raw = chunks[1]
+    tests = _parse_skill_str_list(tests_raw)
+    test = tests[0] if tests else ""
+
+    # --- Parse lib/cell/view from window titles in Python --------------------
+    lib = cell = view = ""
+    for n in names:
+        m = _MAE_TITLE_RE.search(n)
+        if m:
+            lib, cell = m.group(1), m.group(2)
+            view = "maestro"
+            break
+
+    if not lib:
+        # Fallback: cellview-backed windows (uses a second call)
+        r = client.execute_skill('''
+let((result)
+  foreach(w hiGetWindowList()
+    let((cv nm)
+      nm = hiGetWindowName(w)
+      cv = geGetWindowCellView(w)
+      when(and(cv stringp(nm))
+        result = cons(list(cv~>libName cv~>cellName cv~>viewName nm) result))))
+  result)
+''')
+        for m2 in _SKILL_4TUPLE_RE.finditer(r.output or ""):
+            if "Assembler" in m2.group(4) or "maestro" in m2.group(4).lower():
+                lib, cell, view = m2.group(1), m2.group(2), m2.group(3)
+                break
+
+    # --- Round 2: lib_path + history in one let -----------------------------
+    # (maeGetNetlistDir / maeGetResultsDir are absent in IC 6.1.8; derive from
+    # lib_path + cell instead.)
+    lib_path = ""
+    history_list: list[str] = []
+
+    if lib and cell:
+        r = client.execute_skill(
+            f'let((libObj libPath histBase) '
+            f'libObj = ddGetObj("{lib}") '
+            f'libPath = if(libObj libObj~>readPath "") '
+            f'histBase = strcat(libPath "/{cell}/maestro/results/maestro") '
+            f'list(libPath if(isDir(histBase) getDirFiles(histBase) nil)))'
+        )
+        raw2 = (r.output or "").strip()
+        # Expect ("/lib/path" ("f1" "f2" ...))
+        if raw2.startswith("(") and raw2.endswith(")"):
+            body2 = raw2[1:-1]
+            m = re.match(r'\s*"([^"]*)"\s*(.*)$', body2, re.DOTALL)
+            if m:
+                lib_path = m.group(1)
+                rest = m.group(2).strip()
+                raw_hist = _parse_skill_str_list(rest)
+                # Histories may appear either as a bare dir "Interactive.N" or
+                # via their metadata files (e.g. "Interactive.N.rdb" sibling
+                # when data lives in a scratch results dir).  Accept both and
+                # de-duplicate on the bare name.
+                seen: set[str] = set()
+                for h in raw_hist:
+                    m = _INTERACTIVE_RE.match(h)
+                    if m:
+                        bare = h[:-4] if h.endswith(".rdb") else h
+                        seen.add(bare)
+                history_list = sorted(
+                    seen,
+                    key=lambda h: int(h.rsplit(".", 1)[-1])
+                    if h.rsplit(".", 1)[-1].isdigit() else -1
+                )
+
+    sdb_path = f"{lib_path}/{cell}/maestro/maestro.sdb" if lib_path and cell else ""
+    results_base = (
+        f"{lib_path}/{cell}/maestro/results/maestro" if lib_path and cell else ""
+    )
+
+    return {
+        "session": session,
+        "lib": lib,
+        "cell": cell,
+        "view": view,
+        "lib_path": lib_path,
+        "sdb_path": sdb_path,
+        "results_base": results_base,
+        "history_list": history_list,
+        "test": test,
+    }
+
+
+def parse_corners_xml(xml_text: str) -> dict[str, dict]:
+    """Parse ``maestro.sdb`` XML content into structured per-corner dict.
+
+    Pure function — does no I/O.  Returns a dict of corner_name to ::
+
+        {"enabled": bool,
+         "temperature": list[str],
+         "vars": dict[str, str],
+         "parameters": dict[str, str],
+         "models": [{"enabled": bool, "file": str, "section": str,
+                     "block": str, "test": str}, ...]}
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+
+    corners_elem = None
+    for active in root.findall("active"):
+        c = active.find("corners")
+        if c is not None:
+            corners_elem = c
+            break
+    if corners_elem is None:
+        return {}
+
+    result: dict[str, dict] = {}
+    for corner in corners_elem.findall("corner"):
+        name = (corner.text or "").strip()
+        if not name:
+            continue
+        entry: dict = {
+            "enabled": corner.get("enabled", "0") == "1",
+            "temperature": [],
+            "vars": {},
+            "parameters": {},
+            "models": [],
+        }
+        vars_elem = corner.find("vars")
+        if vars_elem is not None:
+            for var in vars_elem.findall("var"):
+                vn = (var.text or "").strip()
+                vv = var.findtext("value", "").strip()
+                if vn == "temperature":
+                    entry["temperature"] = [
+                        t.strip() for t in vv.split(",") if t.strip()
+                    ]
+                elif vn:
+                    entry["vars"][vn] = vv
+        params_elem = corner.find("parameters")
+        if params_elem is not None:
+            for p in params_elem.findall("parameter"):
+                pn = (p.text or "").strip()
+                pv = p.findtext("value", "").strip()
+                if pn:
+                    entry["parameters"][pn] = pv
+        models_elem = corner.find("models")
+        if models_elem is not None:
+            for model in models_elem.findall("model"):
+                entry["models"].append({
+                    "enabled": model.get("enabled", "0") == "1",
+                    "file": model.findtext("modelfile", "").strip(),
+                    "section": model.findtext("modelsection", "").strip().strip('"'),
+                    "block": model.findtext("modelblock", "").strip(),
+                    "test": model.findtext("modeltest", "").strip(),
+                })
+        result[name] = entry
+    return result
+
+
+def read_corners(client: VirtuosoClient, session: str, *,
+                 sdb_path: str | None = None,
+                 local_sdb_path: str | None = None,
+                 reuse_local: bool = False) -> dict[str, dict]:
+    """Download ``maestro.sdb`` and parse into per-corner PVT details.
+
+    The ``axl*`` API is flaky across Virtuoso versions so we go straight to
+    the on-disk XML.  Pass ``local_sdb_path`` to keep the downloaded XML
+    on disk (e.g. inside a snapshot directory); otherwise a temp file is
+    used and deleted.  Set ``reuse_local=True`` to skip the scp when
+    ``local_sdb_path`` already exists.
+    """
+    if sdb_path is None:
+        info = read_session_info(client, session)
+        sdb_path = info.get("sdb_path") or ""
+        if not sdb_path:
+            return {}
+
+    xml_text = read_remote_file(client, sdb_path,
+                                local_path=local_sdb_path,
+                                reuse_if_exists=reuse_local)
+    return parse_corners_xml(xml_text)
+
+
+def read_status(client: VirtuosoClient, session: str) -> dict:
+    """Read session run-state indicators in one round-trip.
+
+    Returns::
+
+        {"run_mode": str,               # "Single Run, Sweeps and Corners" etc.
+         "job_control_mode": str,       # "LSCS" / "Local" / ...
+         "run_plan": list[str],         # names of runs in the plan, if any
+         "current_history_handle": str or None,
+         "messages": {"error": list[str], "warning": list[str],
+                      "info": list[str]}}
+
+    The presence of ``current_history_handle`` indicates the session has
+    at least opened one history (not necessarily still running).  Explicit
+    running/idle/queued distinction has no public SKILL API in IC 6.1.8;
+    inspect ``messages`` + ``history_list`` mtimes to infer.
+    """
+    r = client.execute_skill(
+        f'list('
+        f'  maeGetCurrentRunMode(?session "{session}") '
+        f'  maeGetJobControlMode(?session "{session}") '
+        f'  errset(maeGetRunPlan(?session "{session}")) '
+        f'  errset(axlGetCurrentHistory("{session}")) '
+        f'  errset(maeGetSimulationMessages(?session "{session}" ?msgType "error")) '
+        f'  errset(maeGetSimulationMessages(?session "{session}" ?msgType "warning")) '
+        f'  errset(maeGetSimulationMessages(?session "{session}" ?msgType "info")) '
+        f')'
+    )
+    raw = (r.output or "").strip()
+
+    def _split_top_level(body: str) -> list[str]:
+        parts: list[str] = []
+        depth = 0
+        start = 0
+        in_str = False
+        i = 0
+        n = len(body)
+        # Skip leading whitespace
+        while i < n and body[i].isspace():
+            i += 1
+        start = i
+        while i < n:
+            ch = body[i]
+            if ch == '"' and (i == 0 or body[i - 1] != "\\"):
+                in_str = not in_str
+            elif not in_str:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                elif ch.isspace() and depth == 0:
+                    token = body[start:i].strip()
+                    if token:
+                        parts.append(token)
+                    # skip run of whitespace
+                    while i < n and body[i].isspace():
+                        i += 1
+                    start = i
+                    continue
+            i += 1
+        tail = body[start:].strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    body = raw[1:-1] if raw.startswith("(") and raw.endswith(")") else raw
+    parts = _split_top_level(body)
+    while len(parts) < 7:
+        parts.append("nil")
+
+    def _unquote(s: str) -> str:
+        s = s.strip()
+        if s.startswith('"') and s.endswith('"'):
+            return s[1:-1]
+        return "" if s == "nil" else s
+
+    def _unwrap_errset(s: str) -> str:
+        """errset(X) returns (X) on success or nil on error — strip outer ()."""
+        s = s.strip()
+        if s in ("", "nil"):
+            return ""
+        if s.startswith("(") and s.endswith(")"):
+            return s[1:-1].strip()
+        return s
+
+    def _strlist(s: str) -> list[str]:
+        inner = _unwrap_errset(s)
+        return [x for x in _parse_skill_str_list(inner) if x.strip()]
+
+    run_mode = _unquote(parts[0])
+    jcm = _unquote(parts[1])
+    run_plan = _strlist(parts[2])
+    curr_raw = _unwrap_errset(parts[3])
+    curr_hist_val: str | None = curr_raw.strip('"') if curr_raw else None
+
+    return {
+        "run_mode": run_mode,
+        "job_control_mode": jcm,
+        "run_plan": run_plan,
+        "current_history_handle": curr_hist_val,
+        "messages": {
+            "error": _strlist(parts[4]),
+            "warning": _strlist(parts[5]),
+            "info": _strlist(parts[6]),
+        },
+    }
+
+
+def snapshot(client: VirtuosoClient, session: str, *,
+             include_results: bool = False,
+             sdb_cache_path: str | None = None) -> dict:
+    """Aggregate snapshot of a maestro session in one JSON-serializable dict.
+
+    Combines session_info + config + env + variables + outputs + corners.
+    When ``include_results=True`` also calls ``read_results`` (GUI mode only,
+    may be slow).  Pass ``sdb_cache_path`` to keep the downloaded
+    ``maestro.sdb`` on disk for auditing / diffing.
+    """
+    info = read_session_info(client, session)
+    out: dict = {
+        "session_info": info,
+        "status": read_status(client, session),
+        "config": read_config(client, session),
+        "env": read_env(client, session),
+        "variables": read_variables(client, session),
+        "outputs": read_outputs(client, session),
+        "corners": read_corners(client, session,
+                                sdb_path=info.get("sdb_path") or None,
+                                local_sdb_path=sdb_cache_path,
+                                reuse_local=True),
+    }
+    if include_results:
+        out["results"] = read_results(
+            client, session,
+            lib=info.get("lib", ""), cell=info.get("cell", ""))
+    return out

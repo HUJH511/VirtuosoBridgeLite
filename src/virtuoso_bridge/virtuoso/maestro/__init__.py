@@ -8,7 +8,20 @@ from virtuoso_bridge.virtuoso.maestro.session import (
     close_gui_session,
     _purge_maestro_cellviews as purge_maestro_cellviews,
 )
-from virtuoso_bridge.virtuoso.maestro.reader import read_config, read_env, read_results, export_waveform
+from virtuoso_bridge.virtuoso.maestro.reader import (
+    read_config,
+    read_env,
+    read_results,
+    export_waveform,
+    read_remote_file,
+    read_variables,
+    read_outputs,
+    read_session_info,
+    read_corners,
+    read_status,
+    parse_corners_xml,
+    snapshot,
+)
 from virtuoso_bridge.virtuoso.maestro.writer import (
     # test
     create_test,
@@ -66,6 +79,14 @@ __all__ = [
     "read_env",
     "read_results",
     "export_waveform",
+    "read_remote_file",
+    "read_variables",
+    "read_outputs",
+    "read_session_info",
+    "read_corners",
+    "read_status",
+    "parse_corners_xml",
+    "snapshot",
     # write - test
     "create_test",
     "set_design",
