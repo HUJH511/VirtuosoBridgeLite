@@ -16,6 +16,7 @@ from virtuoso_bridge import VirtuosoClient
 from ._parse_skill import _parse_sexpr, _parse_skill_str_list
 from ._skill import _q, _get_test, _unique_remote_wave_path
 from .remote_io import read_remote_file
+from .session import _natural_sort_histories
 
 
 # PSF filename → short analysis name.  Rules are matched in order; the
@@ -182,7 +183,8 @@ def read_results(client: VirtuosoClient, session: str,
     """Read simulation results: output values, spec status, yield.
 
     Requires GUI mode (deOpenCellView + maeMakeEditable).
-    Finds the latest valid history automatically by scanning Interactive.N.
+    Finds the latest valid history by walking ``maeGetHistoryList`` newest-first
+    (covers Interactive.N, sweep_* / ExplorerRun.* / any user-named history).
     Returns ``{}`` if no results are available.
 
     Returns::
@@ -229,39 +231,33 @@ def read_results(client: VirtuosoClient, session: str,
     if history:
         latest_history = history.strip()
     else:
-        # Scan for latest valid history (highest Interactive.N with outputs)
-        find_expr = f'''
-let((libPath base files nums found)
-  libPath = ddGetObj("{lib}")~>readPath
-  base = strcat(libPath "/{cell}/maestro/results/maestro/")
-  files = getDirFiles(base)
-  nums = list()
-  foreach(f files
-    when(rexMatchp("Interactive" f)
-      let((n) n = cadr(parseString(f "."))
-        when(n nums = cons(atoi(n) nums))
-      )
-    )
-  )
-  nums = sort(setof(n nums n) lambda((a b) a > b))
-  found = nil
-  foreach(n nums
-    unless(found
-      let((h) h = sprintf(nil "Interactive.%d" n)
-        when(maeOpenResults(?history h)
-          when(maeGetResultOutputs(?testName "{test}")
-            found = h
-          )
-          maeCloseResults()
+        # List the maestro results directory, accept any history name
+        # (Interactive.N, sweep_*, ExplorerRun.*, user-named).  Anchor
+        # on the ``<name>.rdb`` metadata file — that's how
+        # read_session_info builds its list too.  Was Interactive.N-only
+        # via SKILL find_expr and silently missed everything else.
+        r = client.execute_skill(
+            f'let((p d) '
+            f'p = ddGetObj("{lib}")~>readPath '
+            f'd = strcat(p "/{cell}/maestro/results/maestro") '
+            f'if(isDir(d) getDirFiles(d) nil))'
         )
-      )
-    )
-  )
-  found
-)
-'''
-        latest_raw = q("findHistory", find_expr)
-        latest_history = latest_raw.strip('"')
+        files = _parse_skill_str_list(r.output or "")
+        hist_list = _natural_sort_histories(files)
+        latest_history = ""
+        # Natural-sort puts oldest-first; walk newest-first.
+        for h in reversed(hist_list):
+            r = client.execute_skill(
+                f'when(maeOpenResults(?history "{h}") '
+                f'  let((outs) '
+                f'    outs = maeGetResultOutputs(?testName "{test}") '
+                f'    maeCloseResults() '
+                f'    outs))'
+            )
+            out = (r.output or "").strip()
+            if out and out != "nil":
+                latest_history = h
+                break
 
     if not latest_history or latest_history == "nil":
         return {}
@@ -374,11 +370,14 @@ def export_waveform(
         ocnPrint(<expression> ?numberNotation 'scientific ?numSpaces 1 ?output "/tmp/...")
         maeCloseResults()
     """
-    # Auto-detect history name (same scan logic as read_results)
+    # Auto-detect history name from the current results dir.
+    # The path shape is `.../maestro/results/maestro/{history}/...` where
+    # `{history}` can be any name Cadence wrote — Interactive.N, sweep_*,
+    # ExplorerRun.0, user-named, etc.  We capture any non-slash run.
     if not history:
         r = client.execute_skill('asiGetResultsDir(asiGetCurrentSession())')
         rd = (r.output or "").strip('"')
-        m = re.search(r'/maestro/results/maestro/(Interactive\.\d+)/', rd)
+        m = re.search(r'/maestro/results/maestro/([^/]+)/', rd)
         if m:
             history = m.group(1)
         else:
