@@ -1,16 +1,9 @@
 """Window-state probes for the focused maestro session.
 
-Three internal helpers used by :mod:`snapshot` and the CLI brief:
-
-- ``_fetch_window_state`` — single SKILL call → focused title, focused
-  window's ``davSession`` (its bound maestro session id), every window
-  title, open sessions list.
-- ``_match_mae_title`` — pure regex over a maestro window title →
-  lib / cell / view / mode / unsaved.
-- ``natural_sort_histories`` — filter + sort a ``results/maestro/``
-  directory listing into ordered history names.
-
-All three are module-private (no ``__all__`` here, no public re-export).
+Two internal helpers used by ``snapshot()`` and the CLI brief:
+``_fetch_window_state`` (1 SKILL call → focused title + davSession +
+window list + session list, title parsed into lib/cell/view/mode) and
+``natural_sort_histories`` (filter + sort a results/maestro listing).
 """
 
 from __future__ import annotations
@@ -38,46 +31,40 @@ _HISTORY_RDB_RE = re.compile(r"^(?!\.)[^/\\]+\.rdb$")
 _HISTORY_DIR_RE = re.compile(r"^(Interactive|MonteCarlo)\.[0-9]+(?:\.[A-Z]{2,4})?$")
 
 
-def _match_mae_title(titles) -> dict:
-    """Parse the first maestro-like title into structured fields.
+def _parse_mae_title(titles) -> dict:
+    """Return parsed fields from the first maestro-shaped title, or
+    ``{}`` if none match.
 
-    Title format::
-
-        Virtuoso® ADE {Assembler|Explorer} {Editing|Reading}: LIB CELL VIEW[*]
-
-    ``*`` at the end is Virtuoso's "unsaved changes" indicator.
-
-    Returns a dict with keys application, lib, cell, view, editable,
-    unsaved_changes — empty dict if no title matches.  ``application``
-    is ``"assembler"`` or ``"explorer"`` (lower-case).
+    Title shape: ``ADE {Assembler|Explorer} {Editing|Reading}: LIB CELL VIEW[*]``
+    (trailing ``*`` = unsaved changes).  Fields:
+    ``application / lib / cell / view / mode / unsaved``.
     """
     for n in titles or ():
         if not n:
             continue
         m = _MAE_TITLE_RE.search(n)
-        if m:
-            app, mode, lib, cell, view, star = m.groups()
-            return {
-                "application": app.lower(),
-                "lib": lib,
-                "cell": cell,
-                "view": view,
-                "editable": mode == "Editing",
-                "unsaved_changes": star == "*",
-            }
+        if not m:
+            continue
+        app, mode, lib, cell, view, star = m.groups()
+        return {
+            "application": app.lower(),
+            "lib": lib, "cell": cell, "view": view,
+            "mode": mode,              # "Editing" / "Reading"
+            "unsaved": star == "*",
+        }
     return {}
 
 
-def _fetch_window_state(client: VirtuosoClient) -> tuple[str, str, list[str], list[str]]:
-    """One SKILL round-trip: (focused_name, focused_session, all_names, all_sessions).
+def _fetch_window_state(client: VirtuosoClient) -> dict:
+    """One SKILL round-trip → focused window info, title parsed.
 
-    The focused-window's bound maestro session is read directly from
-    its ``davSession`` attribute — Cadence stores the session id there
-    for ADE Assembler windows.  Empty string for non-maestro windows
-    (schematic / layout / waveform / ...).
+    Keys: ``session`` (davSession — ``""`` if focus isn't a maestro
+    window), ``title``, ``all_titles``, ``all_sessions``, plus the
+    parsed fields from the focused title: ``application / lib / cell /
+    view / mode / unsaved`` (empty / None when nothing parsed).
 
-    No ``geGetEditCellView`` / ``geGetWindowCellView`` here — those warn
-    on non-graphic windows like the maestro Assembler (GE-2067).
+    davSession is Cadence's own attribute for the bound maestro
+    session on ADE Assembler windows — avoids sdb-scp disambiguation.
     """
     r = client.execute_skill(
         'let((cw) '
@@ -96,23 +83,34 @@ def _fetch_window_state(client: VirtuosoClient) -> tuple[str, str, list[str], li
     )
     while len(chunks) < 4:
         chunks.append("nil")
-    cur_name = chunks[0].strip().strip('"') if chunks[0] != "nil" else ""
-    cur_sess = chunks[1].strip().strip('"') if chunks[1] != "nil" else ""
-    return (cur_name, cur_sess,
-            _parse_skill_str_list(chunks[2]),
-            _parse_skill_str_list(chunks[3]))
+    title = chunks[0].strip().strip('"') if chunks[0] != "nil" else ""
+    sess  = chunks[1].strip().strip('"') if chunks[1] != "nil" else ""
+    all_titles = _parse_skill_str_list(chunks[2])
+    # Parse only the focused title — mixing in other windows' titles
+    # gives inconsistent output (session id from focus + lib/cell from
+    # some sibling window).  Callers that want a brief of a non-focused
+    # window should click it first.
+    parsed = _parse_mae_title([title])
+    return {
+        "session":      sess,
+        "title":        title,
+        "all_titles":   all_titles,
+        "all_sessions": _parse_skill_str_list(chunks[3]),
+        "application":  parsed.get("application"),
+        "lib":          parsed.get("lib", ""),
+        "cell":         parsed.get("cell", ""),
+        "view":         parsed.get("view", ""),
+        "mode":         parsed.get("mode", ""),
+        "unsaved":      parsed.get("unsaved", False),
+    }
 
 
 def natural_sort_histories(hist_files: list[str]) -> list[str]:
-    """Extract history names from a ``results/maestro`` dir listing.
+    """Extract + naturally-sort history names from a results/maestro listing.
 
-    Histories anchor on ``<name>.rdb`` metadata files; bare directories
-    matching ``Interactive.N`` / ``MonteCarlo.N`` are also accepted.
-    Sorts naturally so ``Interactive.2`` < ``Interactive.10``.
-
-    Pure function — no I/O.  Used internally by snapshot to populate
-    ``info["history_list"]`` and by the CLI brief to find the latest
-    history's ``.log`` / ``.scs`` / ``.out`` paths.
+    Anchors on ``<name>.rdb``; also accepts bare ``Interactive.N`` /
+    ``MonteCarlo.N`` dirs.  ``Interactive.2`` sorts before
+    ``Interactive.10``.  Pure function.
     """
     seen: set[str] = set()
     for h in hist_files:

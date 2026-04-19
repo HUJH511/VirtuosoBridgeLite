@@ -13,6 +13,7 @@ from pathlib import Path
 
 from virtuoso_bridge.env import default_user_env_path, load_vb_env, set_runtime_env_file
 from virtuoso_bridge.transport.ssh import SSHRunner, remote_ssh_env_from_os
+from virtuoso_bridge.virtuoso.maestro.reader.snapshot import latest_run_paths
 
 
 def _env_template_path() -> Path:
@@ -717,46 +718,38 @@ def _print_maestro_brief(d: dict) -> None:
     """One-screen summary from a SKILL-only snapshot dict.
 
     Setup details (variables / corners / parameters / per-analysis
-    settings / env options) are not in the dict by design; for those
-    run ``virtuoso-bridge snapshot -o ROOT`` and inspect the XML /
-    .txt files in the resulting directory.
+    settings / env options) are not in the dict — run
+    ``virtuoso-bridge snapshot -o ROOT`` and read the resulting files.
     """
-    app  = d.get("app") or "?"
-    mode = d.get("mode")
-    unsaved = d.get("unsaved")
+    lib, cell, view = d.get("lib", ""), d.get("cell", ""), d.get("view", "")
+    location = "/".join(p for p in (lib, cell, view) if p)
+    mode, unsaved = d.get("mode") or "", d.get("unsaved")
     mode_suffix = f" ({mode}" + (", unsaved)" if unsaved else ")") if mode else ""
 
-    print(f"[{app}] {d.get('location','')}{mode_suffix}")
+    print(f"[{d.get('app') or '?'}] {location}{mode_suffix}")
     print(f"[session] {d.get('session','')}  test={d.get('test','')}")
 
     if d.get("run_mode"):
         print(f"[run mode] {d['run_mode']}")
-
-    analyses = d.get("enabled_analyses") or []
-    if analyses:
-        print(f"[analyses] {', '.join(analyses)}")
-
+    if d.get("enabled_analyses"):
+        print(f"[analyses] {', '.join(d['enabled_analyses'])}")
     if d.get("outputs_count"):
         print(f"[outputs] {d['outputs_count']}")
-
     if d.get("errors_count"):
         print(f"[errors] {d['errors_count']}")
 
-    # --- Latest run paths (deterministic — derived from lib_path /
-    # scratch_root / latest history name).  No extra SKILL needed.
-    lib_path     = d.get("lib_path") or ""
-    scratch      = d.get("scratch_root") or ""
-    test         = d.get("test") or ""
-    latest       = d.get("latest_history") or ""
-    results_base = d.get("results_base") or ""
-    location     = d.get("location") or ""
-
-    if latest and results_base:
-        print(f"[.log] {results_base}/{latest}.log")
-    if latest and scratch and test and location:
-        scr = f"{scratch}/{location}/results/maestro/{latest}/1/{test}"
-        print(f"[.scs] {scr}/netlist/input.scs")
-        print(f"[.out] {scr}/psf/spectre.out")
+    paths = latest_run_paths(
+        lib_path=d.get("lib_path") or "",
+        scratch_root=d.get("scratch_root") or "",
+        lib=lib, cell=cell, view=view,
+        history=d.get("latest_history") or "",
+        test=d.get("test") or "",
+    )
+    for tag, path in (("[.log]", paths["log"]),
+                      ("[.scs]", paths["scs"]),
+                      ("[.out]", paths["out"])):
+        if path:
+            print(f"{tag} {path}")
 
 
 def cli_screenshot() -> int:
