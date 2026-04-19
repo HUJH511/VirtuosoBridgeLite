@@ -1,6 +1,6 @@
 """Maestro (ADE Assembler) session management, config reading, and writing."""
 
-from virtuoso_bridge.virtuoso.maestro.session import (
+from virtuoso_bridge.virtuoso.maestro.lifecycle import (
     open_session,
     close_session,
     find_open_session,
@@ -63,7 +63,6 @@ from virtuoso_bridge.virtuoso.maestro.writer import (
     set_job_policy,
     # simulation
     run_simulation,
-    wait_until_done,
     run_and_wait,
     # export
     create_netlist_for_corner,
@@ -139,7 +138,6 @@ __all__ = [
     "set_job_policy",
     # write - simulation
     "run_simulation",
-    "wait_until_done",
     "run_and_wait",
     # write - export
     "create_netlist_for_corner",

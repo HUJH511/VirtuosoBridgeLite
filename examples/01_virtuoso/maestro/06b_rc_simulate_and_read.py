@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from virtuoso_bridge import VirtuosoClient
 from virtuoso_bridge.virtuoso.maestro import (
-    read_results, export_waveform, save_setup, wait_until_done,
+    read_results, export_waveform, save_setup, run_and_wait,
 )
 
 CELL = "TB_RC_FILTER"
@@ -92,15 +92,14 @@ def main() -> int:
     ensure_gui(client, lib)
     print("[gui] Ready")
 
-    # 2. Run simulation
+    # 2. Run simulation + wait.  run_and_wait registers a SKILL completion
+    # callback atomically with maeRunSimulation, then polls a marker file via
+    # SSH — so the SKILL channel stays free during the wait.
     t0 = time.time()
-    r = client.execute_skill('maeRunSimulation()')
-    run_name = (r.output or "").strip('"')
-
-    if not run_name or run_name == "nil":
-        print("[sim] maeRunSimulation returned nil — session may be stale")
-        print("[sim] Closing and reopening...")
-        # Force close everything and retry
+    try:
+        history, _status = run_and_wait(client, timeout=600)
+    except RuntimeError:
+        print("[sim] run_and_wait failed — session may be stale, closing + reopening...")
         client.execute_skill(f'''
 foreach(s maeGetSessions()
   errset(maeSaveSetup(?lib "{lib}" ?cell "{CELL}" ?view "maestro" ?session s))
@@ -116,18 +115,9 @@ t
         client.execute_skill(
             f'deOpenCellView("{lib}" "{CELL}" "maestro" "maestro" nil "r")')
         client.execute_skill('maeMakeEditable()')
-        r = client.execute_skill('maeRunSimulation()')
-        run_name = (r.output or "").strip('"')
-        if not run_name or run_name == "nil":
-            print("[sim] Still failed. Check Virtuoso state.")
-            return 1
+        history, _status = run_and_wait(client, timeout=600)
 
-    print(f"[sim] Started: {run_name} ({time.time() - t0:.1f}s)")
-
-    # 3. Wait (axlSessionConnect callback, non-blocking)
-    print("[sim] Waiting...")
-    wait_until_done(client, timeout=600)
-    print(f"[sim] Done ({time.time() - t0:.1f}s)")
+    print(f"[sim] Done: {history} ({time.time() - t0:.1f}s)")
 
     # 4. Find session and read results
     r = client.execute_skill('''

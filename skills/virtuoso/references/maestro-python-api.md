@@ -17,7 +17,7 @@ from virtuoso_bridge.virtuoso.maestro import open_session, close_session, read_c
 | Read config | Yes | Yes |
 | Write config | Yes | Yes (needs `maeMakeEditable`) |
 | Run simulation | Can start, but `close_session` cancels it | Yes |
-| `wait_until_done` | Returns immediately (does not wait) | Blocks until done |
+| `run_and_wait` | Starts + callback never fires reliably | Starts + waits for completion |
 | Close | `close_session` → lock removed | `hiCloseWindow` |
 
 **Use background for read/write config. Use GUI for simulation.**
@@ -28,7 +28,7 @@ See **[simulation-flow.md](simulation-flow.md)** for the complete 8-step guide (
 
 ## Session Management
 
-`maestro/session.py`
+`maestro/lifecycle.py`
 
 | Python | SKILL | Description |
 |--------|-------|-------------|
@@ -255,7 +255,6 @@ set_job_control_mode(client, "Local")
 | Python | SKILL | Description |
 |--------|-------|-------------|
 | `run_simulation(client, *, session="", callback="")` | `maeRunSimulation` | Run (async), returns history name |
-| `wait_until_done(client, timeout=600, _marker="")` | SSH poll | Wait for marker file (used by `run_and_wait`) |
 | `run_and_wait(client, *, session="", timeout=600)` | `maeRunSimulation(?callback ...)` + SSH poll | **Recommended.** Run + wait without blocking SKILL channel |
 
 ```python

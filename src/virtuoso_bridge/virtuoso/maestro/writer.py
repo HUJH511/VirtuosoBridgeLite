@@ -232,10 +232,18 @@ def setup_corner(client: VirtuosoClient, name: str, *,
                  model_file: str = "", model_section: str = "",
                  variables: dict[str, str] | None = None,
                  session: str = "") -> str:
-    """Create a fully configured corner with model file and variables.
+    """Convenience wrapper: create a corner + set its vars + attach a model file.
 
-    Uses maeSetCorner + maeSetVar (for corner variables) + axl* setup-DB API
-    (for model file/section). No XML editing required.
+    Internally does three things any caller can also do manually:
+
+      1. :func:`set_corner` — create the corner (``maeSetCorner``).
+      2. For each entry in ``variables``: ``maeSetVar(?typeName "corner" ?typeValue …)``.
+      3. ``axlGetCorner`` → ``axlPutModel`` → ``axlSetModelFile`` /
+         ``axlSetModelSection`` — attach the model.
+
+    Intentionally heavier than its peers — use it when you want a fully
+    configured corner in one call.  For "just create an empty corner",
+    call :func:`set_corner` directly.
 
     Args:
         name: Corner name, e.g. "tt_25"
@@ -338,20 +346,24 @@ def run_simulation(client: VirtuosoClient, *, session: str = "",
     return _q(client, parts)
 
 
-def wait_until_done(client: VirtuosoClient, timeout: int = 600,
-                    _marker: str = "") -> str:
-    """Wait for a simulation that was started with run_and_wait().
+def _wait_until_done(client: VirtuosoClient, marker: str,
+                      timeout: int = 600) -> str:
+    """Internal: poll the marker file written by run_and_wait's SKILL callback.
 
-    Polls a marker file via SSH without blocking the SKILL channel.
-    Prefer run_and_wait() which handles everything automatically.
+    Cadence-side ``maeRunSimulation(?callback ...)`` registers a SKILL
+    callback that ``echo``s ``done`` to ``marker`` when the run finishes.
+    This function ``ssh cat``s that marker every 2 s on the SSH channel,
+    keeping the SKILL channel free for other work (dialog dismissal,
+    screenshots, ...).
 
-    Args:
-        _marker: internal marker path (set by run_and_wait)
+    Not public — call :func:`run_and_wait` instead, which sets up the
+    callback + marker and calls this helper.
     """
     import time as _time
 
-    if not _marker:
-        raise ValueError("No marker path. Use run_and_wait() instead.")
+    runner = client.ssh_runner
+    if runner is None:
+        raise RuntimeError("No SSH connection (tunnel not started?)")
 
     runner = client.ssh_runner
     if runner is None:
@@ -359,9 +371,9 @@ def wait_until_done(client: VirtuosoClient, timeout: int = 600,
 
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
-        r = runner.run_command(f"cat {_marker} 2>/dev/null", timeout=10)
+        r = runner.run_command(f"cat {marker} 2>/dev/null", timeout=10)
         if r.returncode == 0 and r.stdout.strip():
-            runner.run_command(f"rm -f {_marker}", timeout=10)
+            runner.run_command(f"rm -f {marker}", timeout=10)
             return r.stdout.strip()
         _time.sleep(2)
 
@@ -510,7 +522,7 @@ procedure(_vb_sim_done_{nonce}(session runID)
             )
 
     # Poll marker via SSH (SKILL channel stays free)
-    status = wait_until_done(client, timeout=timeout, _marker=marker)
+    status = _wait_until_done(client, marker, timeout=timeout)
     return history, status
 
 

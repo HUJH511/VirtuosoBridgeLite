@@ -2,7 +2,7 @@
 
 Complete flow from opening Maestro to reading results. Follow this order exactly.
 
-> **Why GUI mode?** Background sessions (`open_session` / `maeOpenSetup`) can read/write config but cannot run simulations reliably — `wait_until_done` returns immediately and `close_session` cancels in-flight runs. GUI mode is required for simulation.
+> **Why GUI mode?** Background sessions (`open_session` / `maeOpenSetup`) can read/write config but cannot run simulations reliably — the completion callback `run_and_wait` relies on never fires, and `close_session` cancels in-flight runs. GUI mode is required for simulation.
 
 ## The 8-Step Flow
 
@@ -154,7 +154,7 @@ foreach(s maeGetSessions() maeCloseSession(?session s ?forceClose t))
 | Pitfall | Symptom | Fix |
 |---------|---------|-----|
 | Not purging before open | ASSEMBLER-8127 from stale internal lock | `purge_maestro_cellviews(client)` before `open_gui_session` |
-| Using `open_session` for simulation | `wait_until_done` returns immediately | Use `open_gui_session` (GUI mode), not `open_session` (background) |
+| Using `open_session` for simulation | `run_and_wait` hangs / returns immediately | Use `open_gui_session` (GUI mode), not `open_session` (background) |
 | Skipping `save_setup` | Simulation uses stale parameters | Always save before running |
 | `maeCloseResults` leaves Maestro read-only | Next `maeRunSimulation` fails | Use `open_gui_session` to re-establish editable mode |
 | `maeCloseSession` on GUI-opened session | ASSEMBLER-8051: "opened from UI" | Use `close_gui_session` instead |

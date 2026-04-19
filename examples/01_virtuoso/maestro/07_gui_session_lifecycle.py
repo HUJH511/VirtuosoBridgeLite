@@ -17,7 +17,7 @@ import time
 import logging
 
 from virtuoso_bridge import VirtuosoClient, decode_skill_output
-from virtuoso_bridge.virtuoso.maestro.session import (
+from virtuoso_bridge.virtuoso.maestro.lifecycle import (
     open_gui_session,
     close_gui_session,
     open_session,
