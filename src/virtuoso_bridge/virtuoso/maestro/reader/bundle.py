@@ -1,23 +1,24 @@
-"""Single-round-trip SKILL bundle for ``snapshot()``.
+"""SKILL probes for ``snapshot()`` — each probe is its own label.
 
-:func:`full_bundle` composes every SKILL probe ``snapshot()`` needs
-into one ``let((...) ... list(...))`` expression — the wire-side
-cost collapses to one round-trip.
+Two round-trips total:
 
-Returns brief-shaped fields (test name, analyses names, output count,
-run mode, latest-history info) plus ``raw_sections`` — an ordered
-list of ``(label, raw_skill_text)`` tuples for the
-``state_from_skill.txt`` dump.  No XML→dict / SKILL alist→dict
-parsing — raw text is the canonical format.
+1. **Discover** — single SKILL call → ``test`` name + ``enabled``
+   analysis names.  Needed because per-analysis probes reference these
+   in their text (so the probe string is also its label).
 
-Caller extracts ``sess`` / ``lib`` / ``cell`` / ``view`` from the
-focused window title via :func:`_fetch_window_state` first — that's
-a tiny separate SKILL call.
+2. **Batch** — single SKILL ``list(...)`` call running every probe
+   independently (no shared ``let``-bindings).  Each probe string is
+   self-contained Cadence SKILL — no ``car(libPath)`` style internal
+   references.  The string is what we ran *and* what we display as
+   the section header.
+
+Returns ``raw_sections`` — list of ``(probe_skill_text, raw_output)``
+tuples — plus a few convenience fields (``test``, ``hist_files``)
+that ``snapshot()`` needs for path derivation.  No SKILL alist→Python
+dict parsing.
 """
 
 from __future__ import annotations
-
-from collections import namedtuple
 
 from virtuoso_bridge import VirtuosoClient
 
@@ -30,8 +31,7 @@ from ._parse_skill import _parse_skill_str_list, _tokenize_top_level
 
 def _split_top_level(raw: str, expected: int) -> list[str]:
     """Strip outer parens, tokenize top-level into ``expected`` slots,
-    pad with empty strings if the response was truncated.
-    """
+    pad with empty strings if the response was truncated."""
     body = (raw or "").strip()
     if body.startswith("(") and body.endswith(")"):
         body = body[1:-1]
@@ -45,13 +45,6 @@ def _split_top_level(raw: str, expected: int) -> list[str]:
     return slots
 
 
-def _unquote(s: str) -> str:
-    s = (s or "").strip()
-    if s.startswith('"') and s.endswith('"'):
-        return s[1:-1]
-    return "" if s in ("", "nil") else s
-
-
 def _unwrap_errset(s: str) -> str:
     """``errset(X)`` returns ``(X)`` on success or ``nil`` on error.
     Strip the outer parens (or return "" on error)."""
@@ -63,149 +56,105 @@ def _unwrap_errset(s: str) -> str:
     return s
 
 
-def _scratch_root_from_run_dir(run_dir: str, lib: str, cell: str, view: str) -> str:
-    """Strip ``/{lib}/{cell}/{view}/results/maestro/...`` suffix from
-    ``asiGetAnalogRunDir`` output to recover the install prefix."""
-    if not (run_dir and lib and cell and view):
-        return ""
-    marker = f"/{lib}/{cell}/{view}/results/maestro"
-    idx = run_dir.find(marker)
-    return run_dir[:idx] if idx > 0 else ""
-
-
 # ---------------------------------------------------------------------------
-# Slot table — single source of truth for the SKILL bundle
+# Probes
 # ---------------------------------------------------------------------------
+#
+# Each entry below is a self-contained SKILL expression — no internal
+# let-var references.  Templates use ``{sess}`` / ``{lib}`` / ``{cell}``
+# / ``{view}`` / ``{test}`` placeholders, .format()-substituted at run
+# time so the formatted string IS the section label printed to the user.
+#
+# Per-analysis maeGetAnalysis calls are generated dynamically from the
+# enabled list discovered in the first round-trip.
 
-# ``name``  — key in the parsed-slot dict.
-# ``expr``  — SKILL value expression (references the let-bindings
-#             below; ``{sess}``/``{lib}``/etc. are .format()-substituted).
-# ``label`` — ``state_from_skill.txt`` section header template (same
-#             substitutions).  ``None`` = brief-data-only, no section.
-_Slot = namedtuple("_Slot", "name expr label")
-
-
-# Order MUST match the ``list(...)`` body of the SKILL expression below.
-# Adding a slot = add one entry here.  No other code edits needed.
-_SLOTS: tuple[_Slot, ...] = (
-    _Slot('libpath',     'car(libPath)',                                                'ddGetObj("{lib}")~>readPath'),
-    _Slot('tests',       'tests',                                                       'maeGetSetup(?session "{sess}")'),
-    _Slot('test',        'test',                                                        None),
-    _Slot('enabled',     'enabled',                                                     'maeGetEnabledAnalysis("{test}")'),
-    _Slot('analyses',    'mapcar(lambda((a) maeGetAnalysis(test a ?session "{sess}")) enabled)',
-                                                                                        None),  # special: one section per ana
-    _Slot('env',         'if(test maeGetEnvOption(test ?session "{sess}") nil)',        'maeGetEnvOption("{test}")'),
-    _Slot('sim',         'if(test maeGetSimOption(test ?session "{sess}") nil)',        'maeGetSimOption("{test}")'),
-    _Slot('outputs',     'outsExpr',                                                    'maeGetTestOutputs("{test}") expanded'),
-    _Slot('runmode',     'maeGetCurrentRunMode(?session "{sess}")',                     'maeGetCurrentRunMode(?session "{sess}")'),
-    _Slot('jobcontrol',  'maeGetJobControlMode(?session "{sess}")',                     'maeGetJobControlMode(?session "{sess}")'),
-    _Slot('runplan',     'errset(maeGetRunPlan(?session "{sess}"))',                    'maeGetRunPlan(?session "{sess}")'),
-    _Slot('currhist',    'errset(axlGetCurrentHistory("{sess}"))',                      'axlGetCurrentHistory("{sess}")'),
-    _Slot('errors',      'errset(maeGetSimulationMessages(?session "{sess}" ?msgType "error"))',
-                                                                                        'maeGetSimulationMessages error'),
-    _Slot('warnings',    'errset(maeGetSimulationMessages(?session "{sess}" ?msgType "warning"))',
-                                                                                        'maeGetSimulationMessages warning'),
-    _Slot('infos',       'errset(maeGetSimulationMessages(?session "{sess}" ?msgType "info"))',
-                                                                                        'maeGetSimulationMessages info'),
-    _Slot('histfiles',   'if(isDir(histDir) getDirFiles(histDir) nil)',                 'getDirFiles(<results/maestro>)'),
-    _Slot('rundir',      'car(runDirOK)',                                               'asiGetAnalogRunDir(asiGetSession("{sess}"))'),
+_PROBES_TEMPLATE: tuple[str, ...] = (
+    'ddGetObj("{lib}")~>readPath',
+    'maeGetSetup(?session "{sess}")',
+    'maeGetEnabledAnalysis("{test}" ?session "{sess}")',
+    # per-analysis maeGetAnalysis(...) probes inserted here at run-time
+    'maeGetEnvOption("{test}" ?session "{sess}")',
+    'maeGetSimOption("{test}" ?session "{sess}")',
+    'mapcar(lambda((o) list(o~>name o~>type o~>signal o~>expression'
+        ' o~>plot o~>save o~>evalType o~>yaxisUnit o~>spec))'
+        ' maeGetTestOutputs("{test}" ?session "{sess}"))',
+    'maeGetCurrentRunMode(?session "{sess}")',
+    'maeGetJobControlMode(?session "{sess}")',
+    'errset(maeGetRunPlan(?session "{sess}"))',
+    'errset(axlGetCurrentHistory("{sess}"))',
+    'errset(maeGetSimulationMessages(?session "{sess}" ?msgType "error"))',
+    'errset(maeGetSimulationMessages(?session "{sess}" ?msgType "warning"))',
+    'errset(maeGetSimulationMessages(?session "{sess}" ?msgType "info"))',
+    'getDirFiles(strcat(ddGetObj("{lib}")~>readPath "/{cell}/{view}/results/maestro"))',
+    'errset(asiGetAnalogRunDir(asiGetSession("{sess}")))',
 )
 
 
 def full_bundle(client: VirtuosoClient, *,
                 sess: str, lib: str, cell: str, view: str) -> dict:
-    """Single SKILL round-trip → brief fields + raw SKILL section dump.
+    """Two SKILL round-trips → ``raw_sections`` + path-derivation hints.
 
     Returns::
 
-        {"lib_path": str, "test": str, "analyses": [...],
-         "outputs_count": int, "run_mode": str, "job_control": str,
-         "errors_count": int, "hist_files": [...], "scratch_root": str,
-         "raw_sections": [(label, raw_text), ...]}
+        {"raw_sections": [(probe_skill_text, raw_output), ...],
+         "test":   str,            # car(maeGetSetup) — for path derivation
+         "hist_files": [str, ...]} # for natural_sort_histories
 
-    ``raw_sections`` is suitable for serializing to
-    ``state_from_skill.txt``.  No alist→dict parsing — raw SKILL text
-    is preserved verbatim.
-
-    The user's design cellview (config vs schematic) is not fetched —
-    no SKILL path returns the unresolved cellview reliably; truth lives
-    in ``active.state``'s adeInfo.designInfo (read the filtered XML).
+    No alist→dict parsing.  The probe strings ARE the section labels;
+    callers print ``raw_sections`` verbatim.
     """
     if not sess:
-        return {}
+        return {"raw_sections": [], "test": "", "hist_files": []}
 
-    # SKILL ``let`` bindings shared across slots, plus the ``list(...)``
-    # whose body order matches ``_SLOTS``.  Per-slot exprs may reference
-    # ``{sess}`` / ``{lib}`` / ``{cell}`` / ``{view}`` — substituted here.
-    fmt_skill = {"sess": sess, "lib": lib, "cell": cell, "view": view}
-    list_body = "\n    ".join(s.expr.format(**fmt_skill) for s in _SLOTS)
-    expr = f'''
-let((tests test enabled libPath histDir runDirOK outsExpr)
-  tests    = maeGetSetup(?session "{sess}")
-  test     = if(tests car(tests) "")
-  enabled  = if(test maeGetEnabledAnalysis(test ?session "{sess}") nil)
-  libPath  = errset(ddGetObj("{lib}")~>readPath)
-  histDir  = strcat(car(libPath) "/{cell}/{view}/results/maestro")
-  runDirOK = errset(asiGetAnalogRunDir(asiGetSession("{sess}")))
-  outsExpr = if(test
-    let((outs result)
-      outs = maeGetTestOutputs(test ?session "{sess}")
-      result = list()
-      foreach(o outs
-        result = append1(result
-          list(o~>name o~>type o~>signal o~>expression
-               o~>plot o~>save o~>evalType o~>yaxisUnit o~>spec)))
-      result)
-    nil)
-  list(
-    {list_body}
-  ))
-'''
-    r = client.execute_skill(expr)
-    raw = _split_top_level(r.output or "", expected=len(_SLOTS))
-    slot = dict(zip((s.name for s in _SLOTS), raw))
+    # --- Round 1: discover the test name + enabled analyses ---
+    # Both are needed to format the per-analysis probes in round 2 (so
+    # their printed labels show the actual test/analysis names).
+    r = client.execute_skill(
+        f'list('
+        f'maeGetSetup(?session "{sess}") '
+        f'maeGetEnabledAnalysis(car(maeGetSetup(?session "{sess}")) ?session "{sess}"))'
+    )
+    d = _split_top_level(r.output or "", expected=2)
+    tests = _parse_skill_str_list(_unwrap_errset(d[0]))
+    test = tests[0] if tests else ""
+    enabled = _parse_skill_str_list(_unwrap_errset(d[1]))
 
-    test_name = _unquote(slot["test"])
-    enabled = _parse_skill_str_list(_unwrap_errset(slot["enabled"]))
+    # --- Round 2: every probe, formatted into self-contained SKILL ---
+    fmt = {"sess": sess, "lib": lib, "cell": cell, "view": view, "test": test}
+    # Insert per-analysis probes after maeGetEnabledAnalysis (index 3).
+    head = [p.format(**fmt) for p in _PROBES_TEMPLATE[:3]]
+    per_ana = [
+        f'maeGetAnalysis("{test}" "{ana}" ?session "{sess}")'
+        for ana in enabled
+    ]
+    tail = [p.format(**fmt) for p in _PROBES_TEMPLATE[3:]]
+    probes = head + per_ana + tail
 
-    # Per-analysis raw alist texts — parallel to enabled list, split out
-    # so each maeGetAnalysis call gets its own section (vs nested list).
-    per_analysis_raw = (_split_top_level(slot["analyses"], expected=len(enabled))
-                        if enabled else [])
+    list_body = "\n  ".join(probes)
+    r2 = client.execute_skill(f'list(\n  {list_body}\n)')
+    outputs = _split_top_level(r2.output or "", expected=len(probes))
 
-    # Build raw_sections from the slot table.  ``analyses`` is special:
-    # one section per enabled analysis.  Slots with ``label=None``
-    # are brief-data-only and don't get a section.
-    fmt = {"sess": sess, "lib": lib, "test": test_name}
-    sections: list[tuple[str, str]] = []
-    for spec in _SLOTS:
-        if spec.name == "analyses":
-            for ana, ana_raw in zip(enabled, per_analysis_raw):
-                sections.append((f'maeGetAnalysis("{test_name}" "{ana}")', ana_raw))
-            continue
-        if spec.label is None:
-            continue
-        sections.append((spec.label.format(**fmt), slot[spec.name]))
-
-    # outputs_count: count top-level groups in the expanded outputs slot.
-    outputs_count = len(_tokenize_top_level(
-        _unwrap_errset(slot["outputs"]),
-        include_groups=True, include_strings=False, include_atoms=False,
-    ))
-    # errors_count: empty messages ("") shouldn't count.
-    errors_count = sum(1 for m in _parse_skill_str_list(_unwrap_errset(slot["errors"]))
-                       if m.strip())
+    # Convenience fields snapshot()'s disk-dump path computation needs.
+    # All extracted from the same raw_sections (no extra SKILL).
+    lib_path = ""
+    scratch_root = ""
+    hist_files: list[str] = []
+    for label, raw in zip(probes, outputs):
+        if label.startswith('ddGetObj('):
+            lib_path = (raw or "").strip().strip('"')
+        elif label.startswith("getDirFiles("):
+            hist_files = _parse_skill_str_list(_unwrap_errset(raw))
+        elif label.startswith("errset(asiGetAnalogRunDir"):
+            run_dir = _unwrap_errset(raw).strip().strip('"')
+            marker = f"/{lib}/{cell}/{view}/results/maestro"
+            idx = run_dir.find(marker)
+            if idx > 0:
+                scratch_root = run_dir[:idx]
 
     return {
-        "lib_path":      _unquote(slot["libpath"]),
-        "test":          test_name,
-        "analyses":      enabled,
-        "outputs_count": outputs_count,
-        "run_mode":      _unquote(slot["runmode"]),
-        "job_control":   _unquote(slot["jobcontrol"]),
-        "errors_count":  errors_count,
-        "hist_files":    _parse_skill_str_list(_unwrap_errset(slot["histfiles"])),
-        "scratch_root":  _scratch_root_from_run_dir(
-            _unquote(slot["rundir"]), lib, cell, view),
-        "raw_sections":  sections,
+        "raw_sections": list(zip(probes, outputs)),
+        "test":         test,
+        "hist_files":   hist_files,
+        "lib_path":     lib_path,
+        "scratch_root": scratch_root,
     }

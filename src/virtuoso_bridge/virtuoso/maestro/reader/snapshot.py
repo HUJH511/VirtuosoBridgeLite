@@ -14,6 +14,7 @@ SKILL alists verbatim) / ``state_from_sdb.xml`` (YAML-filtered sdb) /
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -25,34 +26,8 @@ from .session import _fetch_window_state, natural_sort_histories
 
 
 # ---------------------------------------------------------------------------
-# Path builders + disk-dump primitives
+# Disk-dump primitives
 # ---------------------------------------------------------------------------
-
-def latest_run_paths(*, lib_path: str, scratch_root: str,
-                      lib: str, cell: str, view: str,
-                      history: str, test: str) -> dict:
-    """Canonical remote paths for the newest history's run.
-
-    Keys always present (``""`` when not derivable):
-
-    * ``log`` — ``{lib_path}/{cell}/{view}/results/maestro/{history}.log``
-    * ``scs`` — ``{scratch_root}/{lib}/{cell}/{view}/results/maestro/
-                {history}/1/{test}/netlist/input.scs``
-    * ``out`` — same scratch base, ``/psf/spectre.out``
-
-    The ``/1/`` is the run index (``1`` for single-point, per-corner
-    for sweeps); we care only about the primary run.
-    """
-    if not (history and lib_path):
-        return {"log": "", "scs": "", "out": ""}
-    log = f"{lib_path}/{cell}/{view}/results/maestro/{history}.log"
-    if not (scratch_root and test):
-        return {"log": log, "scs": "", "out": ""}
-    scr = f"{scratch_root}/{lib}/{cell}/{view}/results/maestro/{history}/1/{test}"
-    return {"log": log,
-            "scs": f"{scr}/netlist/input.scs",
-            "out": f"{scr}/psf/spectre.out"}
-
 
 def _scp(client: VirtuosoClient, remote: str, local: Path) -> bool:
     """scp ``remote`` → ``local``; swallow errors.  ``True`` on success."""
@@ -101,32 +76,94 @@ def _dump_setup_xmls(client: VirtuosoClient, snap_dir: Path,
                        x, valid_test_names=valid_tests or None))
 
 
-def _dump_skill_text(snap_dir: Path, sections: list[tuple[str, str]]) -> None:
-    """Write ``state_from_skill.txt`` — raw SKILL outputs, one per
-    ``[label]`` section, verbatim.  No alist→dict parsing."""
+def format_skill_sections(sections: list[tuple[str, str]]) -> str:
+    """Format ``raw_sections`` as ``[label] value`` lines.
+
+    Single line per section — SKILL alists are typically single-line
+    anyway, so the bracket-label and value share one line for compact
+    display.  Used by both ``state_from_skill.txt`` and the CLI brief
+    stdout output (single source of truth).  No alist→dict parsing.
+    """
     if not sections:
-        return
-    text = "\n".join(
-        part
-        for label, raw in sections
-        for part in (f"[{label}]", (raw or "").rstrip(), "")
-    ).rstrip() + "\n"
-    (snap_dir / "state_from_skill.txt").write_text(text, encoding="utf-8")
+        return ""
+    return "\n\n".join(
+        f"[{label}] {(raw or '').strip()}" for label, raw in sections
+    ) + "\n"
 
 
-def _dump_run_artifacts(client: VirtuosoClient, snap_dir: Path,
-                         history: str, paths: dict) -> None:
-    """scp the newest run's ``.log`` / ``input.scs`` / ``spectre.out``
-    into ``snap_dir/<history>/``.  Each scp is best-effort."""
-    if not paths.get("log"):
+def _dump_skill_text(snap_dir: Path, sections: list[tuple[str, str]]) -> None:
+    """Write ``state_from_skill.txt`` from ``sections``."""
+    text = format_skill_sections(sections)
+    if text:
+        (snap_dir / "state_from_skill.txt").write_text(text, encoding="utf-8")
+
+
+# Per-point artifacts pulled into ``snap_dir/<history>/``.  Text only —
+# PSF binary waveforms / wavedb are huge and proprietary so we skip them.
+# Add to this tuple to capture more files; the tar packs everything in
+# one ssh round-trip regardless of count.
+_RUN_FILE_NAMES = ("input.scs", "spectre.out", "logFile")
+
+
+def _dump_run_artifacts(client: VirtuosoClient, snap_dir: Path, *,
+                         history: str, lib_path: str, scratch_root: str,
+                         lib: str, cell: str, view: str) -> None:
+    """Pull every per-point ``input.scs`` / ``spectre.out`` / ``logFile``
+    plus the OA ``.log`` for ``history`` into ``snap_dir/<history>/``.
+
+    Single ssh round-trip: server-side ``find | tar`` packs all matched
+    files into one tarball, one ``scp`` pulls it down, local extract
+    rebuilds the per-point layout.  N points × 3 files = 1 ssh + 1 scp
+    (vs N×3 scp's previously).
+    """
+    if not (history and lib_path and scratch_root):
         return
-    hist_dir = snap_dir / history
-    hist_dir.mkdir(parents=True, exist_ok=True)
-    _scp(client, paths["log"], hist_dir / f"{history}.log")
-    if paths.get("scs"):
-        _scp(client, paths["scs"], hist_dir / "input.scs")
-    if paths.get("out"):
-        _scp(client, paths["out"], hist_dir / "spectre.out")
+    runner = client._tunnel._ssh_runner
+    log_remote = f"{lib_path}/{cell}/{view}/results/maestro/{history}.log"
+    hist_remote = (f"{scratch_root}/{lib}/{cell}/{view}"
+                   f"/results/maestro/{history}")
+    remote_tar = f"/tmp/vb_snap_{uuid.uuid4().hex}.tar"
+
+    # find by exact name in the per-point subtree, then tar the matches
+    # plus the OA log file in absolute-path mode (-P).  All in one ssh.
+    name_clauses = " -o ".join(f'-name {n}' for n in _RUN_FILE_NAMES)
+    tar_cmd = (
+        f'find {hist_remote} -type f \\( {name_clauses} \\) -print 2>/dev/null '
+        f'| tar -cf {remote_tar} -P -T - {log_remote} 2>/dev/null && echo OK'
+    )
+    r = runner.run_command(tar_cmd, timeout=30)
+    if "OK" not in (r.stdout or ""):
+        return
+
+    local_tar = snap_dir / "vb_run.tar"
+    try:
+        if not _scp(client, remote_tar, local_tar):
+            return
+        import tarfile
+        hist_dir = snap_dir / history
+        hist_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(local_tar) as tf:
+            for m in tf.getmembers():
+                if not m.isfile():
+                    continue
+                # Map remote absolute path → local relative path under
+                # snap_dir/<history>/.  The OA .log is a sibling of the
+                # history dir; per-point files keep their relative path.
+                if m.name.endswith(f"{history}.log"):
+                    target = hist_dir / f"{history}.log"
+                elif f"/{history}/" in m.name:
+                    target = hist_dir / m.name.split(f"/{history}/", 1)[1]
+                else:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tf.extractfile(m) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+    finally:
+        try:
+            local_tar.unlink()
+        except OSError:
+            pass
+        runner.run_command(f"rm -f {remote_tar}", timeout=10)
 
 
 def _dump_to_dir(client: VirtuosoClient, *, bundle: dict, lib: str, cell: str,
@@ -141,11 +178,10 @@ def _dump_to_dir(client: VirtuosoClient, *, bundle: dict, lib: str, cell: str,
     _dump_setup_xmls(client, snap_dir, lib_path, cell, view)
     _dump_skill_text(snap_dir, bundle.get("raw_sections") or [])
     _dump_run_artifacts(
-        client, snap_dir, latest_history,
-        latest_run_paths(lib_path=lib_path,
-                         scratch_root=bundle.get("scratch_root") or "",
-                         lib=lib, cell=cell, view=view,
-                         history=latest_history, test=bundle.get("test") or ""),
+        client, snap_dir,
+        history=latest_history, lib_path=lib_path,
+        scratch_root=bundle.get("scratch_root") or "",
+        lib=lib, cell=cell, view=view,
     )
     return snap_dir
 
@@ -158,21 +194,25 @@ def snapshot(client: VirtuosoClient, *,
              output_root: str | None = None) -> dict:
     """Snapshot the focused maestro session.
 
-    ``output_root=None`` (default) → SKILL-only sparse dict
-    (~150ms, 2 SKILL round-trips, 0 scp).
-    ``output_root="..."`` → also writes the disk dump to
+    Returns a minimal dict.  ``raw_sections`` is the canonical setup
+    view — list of ``(label, raw_skill_text)`` tuples, one per SKILL
+    probe.  Everything else is window-state metadata or the disk-dump
+    output dir.  No SKILL alist→Python parsing.
+
+    Returned keys:
+
+    * ``session`` — focused davSession id (``""`` if focus isn't a
+      maestro window)
+    * ``app`` / ``lib`` / ``cell`` / ``view`` / ``mode`` / ``unsaved`` —
+      parsed from focused window title
+    * ``raw_sections`` — list of ``(label, raw_text)`` tuples (the
+      same content as ``state_from_skill.txt`` when ``output_root``
+      is given)
+    * ``output_dir`` — added when ``output_root`` is given
+
+    With ``output_root="..."`` also writes the full disk dump to
     ``{output_root}/{YYYYMMDD_HHMMSS}__{lib}__{cell}/`` (raw + filtered
-    XMLs, ``state_from_skill.txt``, newest-run artifacts) and sets
-    ``output_dir`` on the returned dict.
-
-    Returned dict keys: ``session / app / lib / cell / view / mode /
-    unsaved / test / enabled_analyses / outputs_count / run_mode /
-    job_control / errors_count / scratch_root / lib_path /
-    results_base / latest_history / history_list``.
-
-    Setup details (variables / corners / parameters / per-analysis
-    settings / env options) are NOT in the dict — pass ``output_root``
-    and read the XML / .txt files (the canonical format).
+    XMLs, ``state_from_skill.txt``, newest-run artifacts).
     """
     win  = _fetch_window_state(client)
     sess = win["session"]
@@ -182,33 +222,20 @@ def snapshot(client: VirtuosoClient, *,
     bundle = full_bundle(client, sess=sess, lib=lib, cell=cell, view=view) \
              if sess else {}
 
-    lib_path = bundle.get("lib_path") or ""
-    history_list = natural_sort_histories(bundle.get("hist_files") or [])
-    latest_history = history_list[-1] if history_list else ""
-
     out: dict = {
-        "session":          sess,
-        "app":              win["application"],
-        "lib":              lib, "cell": cell, "view": view,
-        "mode":             win["mode"],
-        "unsaved":          win["unsaved"],
-        "test":             bundle.get("test", ""),
-        "enabled_analyses": bundle.get("analyses") or [],
-        "outputs_count":    bundle.get("outputs_count", 0),
-        "run_mode":         bundle.get("run_mode", ""),
-        "job_control":      bundle.get("job_control", ""),
-        "errors_count":     bundle.get("errors_count", 0),
-        "scratch_root":     bundle.get("scratch_root") or None,
-        "lib_path":         lib_path,
-        "results_base":     (f"{lib_path}/{cell}/{view}/results/maestro"
-                             if lib_path and cell and view else ""),
-        "latest_history":   latest_history,
-        "history_list":     history_list,
+        "session":      sess,
+        "app":          win["application"],
+        "lib":          lib, "cell": cell, "view": view,
+        "mode":         win["mode"],
+        "unsaved":      win["unsaved"],
+        "raw_sections": bundle.get("raw_sections") or [],
     }
 
     if output_root is not None:
         if not sess:
             raise RuntimeError("No focused maestro window.")
+        latest_history = (natural_sort_histories(bundle.get("hist_files") or [])
+                          or [""])[-1]
         snap_dir = _dump_to_dir(
             client, bundle=bundle, lib=lib, cell=cell, view=view,
             sess=sess, latest_history=latest_history,

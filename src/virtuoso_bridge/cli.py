@@ -13,7 +13,6 @@ from pathlib import Path
 
 from virtuoso_bridge.env import default_user_env_path, load_vb_env, set_runtime_env_file
 from virtuoso_bridge.transport.ssh import SSHRunner, remote_ssh_env_from_os
-from virtuoso_bridge.virtuoso.maestro.reader.snapshot import latest_run_paths
 
 
 def _env_template_path() -> Path:
@@ -714,42 +713,26 @@ def cli_snapshot() -> int:
     return 0
 
 
+_BRIEF_INCLUDE_PREFIXES = (
+    "ddGetObj(",                              # lib readPath
+    "maeGetSetup(",                           # test name(s)
+    "maeGetEnabledAnalysis(",                 # analysis names
+    "maeGetAnalysis(",                        # per-analysis settings
+)
+
+
 def _print_maestro_brief(d: dict) -> None:
-    """One-screen summary from a SKILL-only snapshot dict.
-
-    Setup details (variables / corners / parameters / per-analysis
-    settings / env options) are not in the dict — run
-    ``virtuoso-bridge snapshot -o ROOT`` and read the resulting files.
-    """
-    lib, cell, view = d.get("lib", ""), d.get("cell", ""), d.get("view", "")
-    location = "/".join(p for p in (lib, cell, view) if p)
-    mode, unsaved = d.get("mode") or "", d.get("unsaved")
-    mode_suffix = f" ({mode}" + (", unsaved)" if unsaved else ")") if mode else ""
-
-    print(f"[{d.get('app') or '?'}] {location}{mode_suffix}")
-    print(f"[session] {d.get('session','')}  test={d.get('test','')}")
-
-    if d.get("run_mode"):
-        print(f"[run mode] {d['run_mode']}")
-    if d.get("enabled_analyses"):
-        print(f"[analyses] {', '.join(d['enabled_analyses'])}")
-    if d.get("outputs_count"):
-        print(f"[outputs] {d['outputs_count']}")
-    if d.get("errors_count"):
-        print(f"[errors] {d['errors_count']}")
-
-    paths = latest_run_paths(
-        lib_path=d.get("lib_path") or "",
-        scratch_root=d.get("scratch_root") or "",
-        lib=lib, cell=cell, view=view,
-        history=d.get("latest_history") or "",
-        test=d.get("test") or "",
-    )
-    for tag, path in (("[.log]", paths["log"]),
-                      ("[.scs]", paths["scs"]),
-                      ("[.out]", paths["out"])):
-        if path:
-            print(f"{tag} {path}")
+    """Dump high-signal SKILL sections to stdout, ``state_from_skill.txt``
+    format (``[label]`` + verbatim value).  Whitelist of probe prefixes
+    above — new probes default to disk-dump-only.  ``snapshot -o ROOT``
+    keeps the full set.  No alist→dict parsing; no path lines (paths
+    can't be verified without scp)."""
+    from virtuoso_bridge.virtuoso.maestro.reader.snapshot import format_skill_sections
+    sections = [(label, raw) for label, raw in (d.get("raw_sections") or [])
+                if any(label.startswith(p) for p in _BRIEF_INCLUDE_PREFIXES)]
+    text = format_skill_sections(sections)
+    if text:
+        print(text, end="")
 
 
 def cli_screenshot() -> int:
