@@ -723,9 +723,11 @@ def cli_dismiss_dialog() -> int:
 _SCREENSHOT_TARGET: list[str] = ["ciw"]
 
 # Mutable bag for cli_snapshot — set from argparse, read inside the handler.
+# `output_root=None` is a sentinel for "user didn't pass -o" — that's what
+# selects brief stdout mode.
 _SNAPSHOT_OPTS: dict = {
-    "output_root":            "output/snapshots",
-    "stdout":                 False,
+    "output_root":            None,
+    "json":                   False,
     "include_output_values":  False,
     "no_latest_history":      False,
     "no_raw_skill":           False,
@@ -778,52 +780,41 @@ def cli_windows() -> int:
 def cli_snapshot() -> int:
     """Snapshot the currently-focused Virtuoso window.
 
-    Auto-detects whether it's a maestro / schematic / layout / ... and
-    dispatches.  Default: dump to a timestamped directory under
-    ``output/snapshots/``.  Use ``--stdout`` to print JSON to stdout
-    instead (no disk writes).
+    Three modes:
+      default     : brief one-screen summary to stdout (fast — skips
+                     latest-history scp, no disk writes).
+      ``-o ROOT`` : full snapshot_to_dir under ROOT (slow but complete:
+                     snapshot.json + histories.json + latest_history.json
+                     + raw_skill.json + probe_log.json + maestro.sdb).
+      ``--json``  : full in-memory snapshot dict as JSON to stdout.
     """
     _load_cli_env()
     import json
+    import re
     import sys
-    from pathlib import Path
     from virtuoso_bridge import VirtuosoClient
     from virtuoso_bridge.virtuoso import snapshot as poly_snapshot
+    from virtuoso_bridge.virtuoso.snapshot import classify_window
     from virtuoso_bridge.virtuoso.maestro import snapshot_to_dir as _maestro_to_dir
 
     client = VirtuosoClient.from_env()
     opts = _SNAPSHOT_OPTS
-    output_root = opts["output_root"]
 
-    # Probe the window kind first (one tiny SKILL call) so we can pick
-    # the right backend.  For maestro we route to snapshot_to_dir
-    # (gives us metrics + raw_skill log + sibling JSON files); other
-    # kinds go through the in-memory dispatcher and either stdout or a
-    # single .json file.
-    title = client.execute_skill(
+    # Focused window title — decode SKILL octal escapes (e.g. \256 -> ®).
+    title = (client.execute_skill(
         'let((cw) cw = hiGetCurrentWindow() if(cw hiGetWindowName(cw) ""))'
-    ).output or ""
-    title = title.strip().strip('"')
-    from virtuoso_bridge.virtuoso.snapshot import classify_window
+    ).output or "").strip().strip('"')
+    title = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), title)
     kind = classify_window(title)
 
-    print(f"focused: [{kind}] {title}", file=sys.stderr)
-
-    if opts["stdout"]:
-        # In-memory snapshot, JSON to stdout.
-        result = poly_snapshot(
-            client,
-            include_output_values=opts["include_output_values"],
-            include_latest_history=not opts["no_latest_history"],
-        ) if kind == "maestro" else poly_snapshot(client)
-        json.dump(result, sys.stdout, indent=2, ensure_ascii=False, default=str)
-        sys.stdout.write("\n")
-        return 0
-
-    # On-disk path.
-    if kind == "maestro":
+    # Mode 1: -o ROOT — full disk snapshot (maestro only for now).
+    if opts["output_root"] is not None:
+        if kind != "maestro":
+            print(f"[{kind}] {title}", file=sys.stderr)
+            print(f"-o ROOT only supports maestro for now.", file=sys.stderr)
+            return 1
         snap_dir = _maestro_to_dir(
-            client, output_root=output_root,
+            client, output_root=opts["output_root"],
             include_output_values=opts["include_output_values"],
             include_latest_history=not opts["no_latest_history"],
             include_raw_skill=not opts["no_raw_skill"],
@@ -832,20 +823,60 @@ def cli_snapshot() -> int:
         print(snap_dir)
         return 0
 
-    # Unsupported kind: write the envelope dict so the user gets *something*.
+    # Mode 2: --json — full in-memory dict to stdout.
+    if opts["json"]:
+        result = poly_snapshot(client) if kind != "maestro" else poly_snapshot(
+            client,
+            include_output_values=opts["include_output_values"],
+            include_latest_history=not opts["no_latest_history"],
+        )
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False, default=str)
+        sys.stdout.write("\n")
+        return 0
+
+    # Mode 3 (default): brief stdout summary.
     if kind == "unknown":
-        print(f"no recognizable Virtuoso window in focus", file=sys.stderr)
+        print(f"no Virtuoso window in focus  ({title or '(no title)'})", file=sys.stderr)
         return 1
-    result = poly_snapshot(client)
-    out_dir = Path(output_root) / f"snapshot_{kind}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "snapshot.json"
-    out_file.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str),
-                        encoding="utf-8")
-    print(out_file)
-    print(f"({kind} snapshot is stub — only kind/window_title written; "
-          f"add an aggregator in virtuoso/snapshot.py)", file=sys.stderr)
+    if kind != "maestro":
+        # Other kinds: just identify, don't try to read.
+        print(f"[{kind}] {title}")
+        print(f"(brief snapshot for {kind} not implemented; only maestro is wired up)")
+        return 0
+
+    # Maestro brief: skip latest_history (the spectre.out scp is the
+    # bulk of the wall time).  Still pulls sdb once for vars/corners.
+    data = poly_snapshot(client, include_latest_history=False)["data"]
+    _print_maestro_brief(data, title)
     return 0
+
+
+def _print_maestro_brief(d: dict, title: str) -> None:
+    sess     = d.get("session") or {}
+    vars_    = d.get("variables") or {}
+    g        = vars_.get("globals") or {}
+    pt       = vars_.get("per_test") or {}
+    sweeps   = [k for k, v in g.items()
+                if v.get("kind") in ("range_sweep", "list_sweep")]
+    enabled  = d.get("corners_enabled") or []
+    odefs    = d.get("output_defs") or []
+    computed = sum(1 for o in odefs if o.get("kind") == "computed")
+    analyses = list((d.get("analyses") or {}).keys())
+
+    print(f"focused : [{sess.get('app','?')}] {d.get('location','')}  "
+          f"({sess.get('mode','?')}{', unsaved' if sess.get('unsaved') else ''})")
+    print(f"session : {sess.get('id','')}  test={sess.get('test','')}")
+    if analyses:
+        print(f"analyses: {', '.join(analyses)}")
+    pt_brief = ", ".join(f"{t}={len(v)}" for t, v in pt.items()) if pt else "—"
+    sweep_str = f"  sweeps={sweeps}" if sweeps else ""
+    print(f"vars    : {len(g)} globals, per_test={{{pt_brief}}}{sweep_str}")
+    print(f"corners : {len(enabled)} enabled  {enabled}")
+    if odefs:
+        print(f"outputs : {len(odefs)} ({computed} computed)")
+    sr = d.get("scratch_root")
+    if sr:
+        print(f"scratch : {sr}")
 
 
 def cli_screenshot() -> int:
@@ -924,19 +955,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_snap = subparsers.add_parser(
         "snapshot",
-        help="Snapshot the focused Virtuoso window (auto-detects maestro/schematic/...)")
-    sp_snap.add_argument("-o", "--output-root", default="output/snapshots",
-                         help="Where to write the snapshot directory (default: output/snapshots)")
-    sp_snap.add_argument("--stdout", action="store_true",
-                         help="Print JSON to stdout instead of writing to disk")
+        help="Brief summary of the focused Virtuoso window "
+             "(maestro/schematic/...).  -o ROOT for full disk dump; "
+             "--json for full in-memory JSON.")
+    sp_snap.add_argument("-o", "--output-root", default=None,
+                         help="Full snapshot to disk under this dir "
+                              "(slow: includes latest history log + spectre.out tail). "
+                              "Without -o, prints a brief summary to stdout.")
+    sp_snap.add_argument("--json", action="store_true",
+                         help="Print full snapshot dict as JSON to stdout (overrides default brief)")
     sp_snap.add_argument("--include-output-values", action="store_true",
                          help="(maestro) Pull simulation output scalars (GUI mode required)")
     sp_snap.add_argument("--no-latest-history", action="store_true",
-                         help="(maestro) Skip the newest-history log + spectre.out tail")
+                         help="(maestro -o ROOT) Skip the newest-history log + spectre.out tail")
     sp_snap.add_argument("--no-raw-skill", action="store_true",
-                         help="(maestro) Don't write raw_skill.json")
+                         help="(maestro -o ROOT) Don't write raw_skill.json")
     sp_snap.add_argument("--no-metrics", action="store_true",
-                         help="(maestro) Don't write probe_log.json")
+                         help="(maestro -o ROOT) Don't write probe_log.json")
     sp_snap.add_argument("-p", "--profile", default=None,
                          help="Connection profile")
     sp_snap.add_argument("--env", default=None,

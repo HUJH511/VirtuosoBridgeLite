@@ -167,6 +167,12 @@ def snapshot_to_dir(client: VirtuosoClient, *,
         snap_dir.mkdir(parents=True, exist_ok=True)
         local_sdb = snap_dir / "maestro.sdb"
 
+        # Persist the latest run's raw .log and spectre.out into the snap
+        # dir alongside the parsed JSON, instead of letting them go to a
+        # temp file that gets unlinked.  Caller can grep / diff them later.
+        log_local     = snap_dir / "latest_history.log"
+        spectre_local = snap_dir / "latest_history.spectre.out"
+
         # snapshot() now handles scratch_root auto-detection itself; just
         # pass the caller's value through (None = detect, "" = skip).
         snap = snapshot(
@@ -175,6 +181,8 @@ def snapshot_to_dir(client: VirtuosoClient, *,
             include_latest_history=include_latest_history,
             sdb_cache_path=str(local_sdb),
             scratch_root=scratch_root,
+            log_cache_path=str(log_local) if include_latest_history else None,
+            spectre_cache_path=str(spectre_local) if include_latest_history else None,
         )
         # Back-compat alias: old field name from when detection lived here.
         snap["scratch_root_detected"] = snap.get("scratch_root")
@@ -271,7 +279,9 @@ def snapshot(client: VirtuosoClient, *,
              include_raw: bool = False,
              include_latest_history: bool = True,
              sdb_cache_path: str | None = None,
-             scratch_root: str | None = None) -> dict:
+             scratch_root: str | None = None,
+             log_cache_path: str | None = None,
+             spectre_cache_path: str | None = None) -> dict:
     """Aggregate snapshot of the currently-focused maestro session.
 
     Always uses the focused window (``hiGetCurrentWindow()``) as the
@@ -401,5 +411,7 @@ def snapshot(client: VirtuosoClient, *,
         if include_latest_history:
             out["latest_history"] = read_latest_history(
                 client, info, scratch_root=scratch_root,
+                log_cache_path=log_cache_path,
+                spectre_cache_path=spectre_cache_path,
             )
         return out
