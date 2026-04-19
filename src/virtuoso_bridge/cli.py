@@ -531,158 +531,6 @@ def cli_license() -> int:
 
 # -- main -------------------------------------------------------------------
 
-def _probe_remote_processes(running_jobs: list[dict]) -> dict[str, dict]:
-    """SSH into remote hosts and check Spectre process CPU/MEM usage.
-
-    Groups jobs by remote_host to minimize SSH connections.
-    Returns {job_id: {"cpu": "12.3", "mem": "2.1", "alive": True}}.
-    """
-    from virtuoso_bridge.transport.ssh import SSHRunner
-
-    host_groups: dict[tuple, list[dict]] = {}
-    for j in running_jobs:
-        host = j.get("remote_host")
-        user = j.get("remote_user")
-        if host:
-            host_groups.setdefault((host, user), []).append(j)
-
-    results: dict[str, dict] = {}
-    for (host, user), group_jobs in host_groups.items():
-        try:
-            runner = SSHRunner(host=host, user=user)
-            ps_result = runner.run_command(
-                "ps -eo pid,%cpu,%mem,etime,args 2>/dev/null | grep '[s]pectre'",
-                timeout=5,
-            )
-            ps_lines = (ps_result.stdout or "").strip().splitlines()
-
-            for j in group_jobs:
-                netlist_name = j.get("netlist", "")
-                for line in ps_lines:
-                    if netlist_name and netlist_name in line:
-                        parts = line.split()
-                        if len(parts) >= 4:
-                            results[j["id"]] = {
-                                "cpu": parts[1],
-                                "mem": parts[2],
-                                "etime": parts[3],
-                                "alive": True,
-                            }
-                        break
-                else:
-                    results[j["id"]] = {"alive": False}
-        except Exception:
-            continue
-
-    return results
-
-
-def cli_sim_jobs() -> int:
-    """Show status of submitted Spectre simulations."""
-    _load_cli_env()
-    from virtuoso_bridge.spectre.runner import read_all_jobs
-
-    jobs = read_all_jobs()
-    if not jobs:
-        print("No simulation jobs found.")
-        return 0
-
-    running = [j for j in jobs if j.get("status") == "running"]
-    queued = [j for j in jobs if j.get("status") == "queued"]
-    done = [j for j in jobs if j.get("status") == "done"]
-    errored = [j for j in jobs if j.get("status") == "error"]
-
-    print(f"Simulation Jobs: {len(running)} running, {len(queued)} queued, "
-          f"{len(done)} done, {len(errored)} failed\n")
-
-    # Probe remote processes for CPU/MEM on running jobs
-    probes: dict[str, dict] = {}
-    if running:
-        probes = _probe_remote_processes(running)
-
-    def _fmt_time(iso: str | None) -> str:
-        if not iso:
-            return ""
-        try:
-            t = datetime.fromisoformat(iso)
-            return t.strftime("%H:%M:%S")
-        except (ValueError, TypeError):
-            return ""
-
-    def _fmt_host(j: dict) -> str:
-        user = j.get("remote_user", "")
-        host = j.get("remote_host", "")
-        if user and host:
-            return f"{user}@{host}"
-        return host or "local"
-
-    def _fmt_duration(j: dict) -> str:
-        s = j.get("submitted")
-        f = j.get("finished")
-        if s and f:
-            try:
-                dt = datetime.fromisoformat(f) - datetime.fromisoformat(s)
-                return f"{int(dt.total_seconds())}s"
-            except (ValueError, TypeError):
-                pass
-        if s:
-            try:
-                dt = datetime.now(timezone.utc) - datetime.fromisoformat(s)
-                return f"{int(dt.total_seconds())}s"
-            except (ValueError, TypeError):
-                pass
-        return ""
-
-    for j in running + queued:
-        status_icon = "\033[33m●\033[0m" if j["status"] == "running" else "\033[90m○\033[0m"
-        host = _fmt_host(j)
-        start = _fmt_time(j.get("submitted"))
-        dur = _fmt_duration(j)
-
-        probe = probes.get(j.get("id", ""), {})
-        cpu_info = ""
-        if probe.get("alive"):
-            cpu_info = f"  CPU:{probe['cpu']}% MEM:{probe['mem']}%"
-        elif j["status"] == "running" and probe.get("alive") is False:
-            cpu_info = "  \033[90m(process not found)\033[0m"
-
-        print(f"{status_icon} {j['id']}  {host:<25s} {j['netlist']:<24s} {j['status']:<8s} {start} {dur}{cpu_info}")
-
-    for j in done[-5:]:
-        host = _fmt_host(j)
-        start = _fmt_time(j.get("submitted"))
-        end = _fmt_time(j.get("finished"))
-        dur = _fmt_duration(j)
-        print(f"\033[32m✓\033[0m {j['id']}  {host:<25s} {j['netlist']:<24s} done     {start}-{end} {dur}")
-
-    for j in errored[-3:]:
-        host = _fmt_host(j)
-        start = _fmt_time(j.get("submitted"))
-        end = _fmt_time(j.get("finished"))
-        dur = _fmt_duration(j)
-        err = j.get("errors", [""])[0][:30] if j.get("errors") else ""
-        print(f"\033[31m✗\033[0m {j['id']}  {host:<25s} {j['netlist']:<24s} fail     {start}-{end} {dur}  {err}")
-
-    print()
-    return 0
-
-
-def cli_sim_cancel() -> int:
-    """Cancel a running simulation by job ID."""
-    _load_cli_env()
-    from virtuoso_bridge.spectre.runner import cancel_job
-    job_id = _SIM_CANCEL_JOB_ID[0]
-    if not job_id:
-        print("Usage: virtuoso-bridge sim-cancel <job-id>")
-        return 1
-    msg = cancel_job(job_id)
-    print(msg)
-    return 0
-
-
-_SIM_CANCEL_JOB_ID: list[str] = [""]
-
-
 def _make_ssh_runner() -> "SSHRunner":
     """Create an SSHRunner from .env config (for X11 commands)."""
     from virtuoso_bridge.transport.ssh import SSHRunner
@@ -921,13 +769,11 @@ def _print_maestro_brief(d: dict) -> None:
         for o in odefs:
             kind_o = o.get("kind", "?")
             name = o.get("name") or o.get("signal") or "(unnamed)"
-            ana  = o.get("analysis", "")
-            ana_tag = f" [{ana}]" if ana else ""
             if kind_o == "computed":
                 expr = o.get("expr", "")
                 if len(expr) > 80:
                     expr = expr[:77] + "..."
-                print(f"  {name}{ana_tag} = {expr}")
+                print(f"  {name} = {expr}")
             else:
                 t = o.get("type") or ""
                 print(f"  {name} = save-only ({t})")
@@ -947,9 +793,9 @@ def _print_maestro_brief(d: dict) -> None:
             latest_spectre = (runs[0].get("psf") or {}).get("spectre_out", "")
 
     if latest_hist and results_base:
-        print(f".log    : {results_base}/{latest_hist}.log")
+        print(f"[.log] {results_base}/{latest_hist}.log")
     if latest_spectre:
-        print(f".out    : {latest_spectre}")
+        print(f"[.out] {latest_spectre}")
 
 
 def cli_screenshot() -> int:
@@ -995,14 +841,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Connection profile (reads VB_*_<profile> env vars)")
         sp.add_argument("--env", default=None,
                         help="Explicit .env file path (highest priority)")
-    sp_jobs = subparsers.add_parser("sim-jobs", help="Show submitted simulation jobs")
-    sp_jobs.add_argument("--env", default=None,
-                         help="Explicit .env file path (highest priority)")
-    sp_cancel = subparsers.add_parser("sim-cancel", help="Cancel a running simulation")
-    sp_cancel.add_argument("--env", default=None,
-                           help="Explicit .env file path (highest priority)")
-    sp_cancel.add_argument("job_id", help="Job ID to cancel (from sim-jobs)")
-
     sp_dismiss = subparsers.add_parser(
         "dismiss-dialog", help="Find and dismiss blocking Virtuoso GUI dialogs")
     sp_dismiss.add_argument("-p", "--profile", default=None,
@@ -1088,8 +926,6 @@ def main(argv: list[str] | None = None) -> int:
         "restart": cli_restart,
         "status": cli_status,
         "license": cli_license,
-        "sim-jobs": cli_sim_jobs,
-        "sim-cancel": cli_sim_cancel,
         "dismiss-dialog": cli_dismiss_dialog,
         "screenshot": cli_screenshot,
         "windows": cli_windows,
@@ -1100,9 +936,6 @@ def main(argv: list[str] | None = None) -> int:
     if profile is not None:
         _CLI_PROFILE[0] = profile
     set_runtime_env_file(getattr(args, "env", None))
-    job_id = getattr(args, "job_id", None)
-    if job_id is not None:
-        _SIM_CANCEL_JOB_ID[0] = job_id
     screenshot_target = getattr(args, "target", None)
     if screenshot_target is not None:
         _SCREENSHOT_TARGET[0] = screenshot_target

@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import importlib.resources
-import json
 import logging
 import os
 import shlex
 import shutil
-import signal
-import subprocess
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -28,157 +24,6 @@ from virtuoso_bridge.transport.remote_paths import (
 from virtuoso_bridge.transport.ssh import SSHRunner, RemoteTaskResult, run_remote_task, remote_ssh_env_from_os
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Job registry — persists job status to disk so CLI can read it
-# ---------------------------------------------------------------------------
-
-_JOBS_DIR = Path.home() / ".cache" / "virtuoso_bridge" / "jobs"
-
-
-def _job_path(job_id: str) -> Path:
-    return _JOBS_DIR / f"{job_id}.json"
-
-
-def _write_job(job_id: str, data: dict) -> None:
-    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    _job_path(job_id).write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-def _update_job(job_id: str, updates: dict) -> None:
-    path = _job_path(job_id)
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data.update(updates)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-_JOB_EXPIRY_SECONDS = 600  # auto-delete finished jobs after 10 minutes
-
-
-def _expire_old_jobs() -> None:
-    """Remove finished job records older than 10 minutes."""
-    if not _JOBS_DIR.exists():
-        return
-    now = datetime.now(timezone.utc)
-    for f in _JOBS_DIR.glob("*.json"):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            if data.get("status") not in ("done", "error"):
-                continue
-            finished = data.get("finished")
-            if finished:
-                dt = now - datetime.fromisoformat(finished)
-                if dt.total_seconds() > _JOB_EXPIRY_SECONDS:
-                    f.unlink()
-        except (json.JSONDecodeError, OSError, ValueError):
-            continue
-
-
-def read_all_jobs() -> list[dict]:
-    """Read all job records. Auto-expires finished jobs older than 10 min."""
-    _expire_old_jobs()
-    if not _JOBS_DIR.exists():
-        return []
-    jobs = []
-    for f in sorted(_JOBS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime):
-        try:
-            jobs.append(json.loads(f.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            continue
-    return jobs
-
-
-def cancel_job(job_id: str) -> str:
-    """Cancel a running simulation by job ID. Returns status message.
-
-    Reads the job record to find the remote host, then SSH-kills the
-    Spectre process using the PID file written at launch.
-    """
-    load_vb_env()
-    path = _job_path(job_id)
-    if not path.exists():
-        return f"Job {job_id} not found"
-
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("status") not in ("running", "queued"):
-        return f"Job {job_id} is already {data.get('status')}"
-
-    remote_host = data.get("remote_host")
-    remote_user = data.get("remote_user")
-    remote_work_dir = data.get("remote_work_dir")
-
-    if not remote_host or _is_localhost(remote_host):
-        # Local mode: find and kill Spectre processes by netlist name
-        netlist_name = data.get("netlist", "")
-        killed_pids: list[int] = []
-        if netlist_name:
-            try:
-                pgrep = subprocess.run(
-                    ["pgrep", "-f", netlist_name],
-                    capture_output=True, text=True,
-                )
-                for line in pgrep.stdout.strip().splitlines():
-                    line = line.strip()
-                    if line.isdigit():
-                        pid = int(line)
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                            killed_pids.append(pid)
-                        except ProcessLookupError:
-                            pass
-            except Exception:
-                pass
-
-        _update_job(job_id, {
-            "status": "error",
-            "finished": datetime.now(timezone.utc).isoformat(),
-            "errors": ["cancelled by user"],
-        })
-        if killed_pids:
-            pids_str = ", ".join(str(p) for p in killed_pids)
-            return f"Job {job_id} cancelled (killed PID {pids_str})"
-        return f"Job {job_id} marked cancelled (process may have already finished)"
-
-    # SSH in and kill the Spectre process
-    try:
-        runner = SSHRunner(host=remote_host, user=remote_user)
-        # Try to find and kill via PID file in any run dir under the work dir
-        kill_cmd = (
-            f"for f in /tmp/virtuoso_bridge_spectre/*/spectre.pid; do "
-            f"  if [ -f \"$f\" ]; then "
-            f"    pid=$(cat \"$f\"); "
-            f"    if kill -0 $pid 2>/dev/null; then "
-            f"      kill $pid 2>/dev/null && echo \"killed:$pid\"; "
-            f"    fi; "
-            f"  fi; "
-            f"done"
-        )
-        # More targeted: if we know the netlist name, grep for it
-        netlist_name = data.get("netlist", "")
-        if netlist_name:
-            kill_cmd = (
-                f"pgrep -f '{netlist_name}' | while read pid; do "
-                f"  kill $pid 2>/dev/null && echo \"killed:$pid\"; "
-                f"done"
-            )
-
-        result = runner.run_command(kill_cmd, timeout=10)
-        killed = [l for l in (result.stdout or "").splitlines() if l.startswith("killed:")]
-
-        _update_job(job_id, {
-            "status": "error",
-            "finished": datetime.now(timezone.utc).isoformat(),
-            "errors": ["cancelled by user"],
-        })
-
-        if killed:
-            pids = ", ".join(l.split(":")[1] for l in killed)
-            return f"Job {job_id} cancelled (killed PID {pids})"
-        return f"Job {job_id} marked cancelled (process may have already finished)"
-
-    except Exception as exc:
-        return f"Job {job_id} cancel failed: {exc}"
 
 
 SPECTRE_MODE_ARGS: dict[str, list[str]] = {
@@ -713,54 +558,17 @@ class SpectreSimulator:
 
     # -- public API ---------------------------------------------------------
 
-    def run_simulation(self, netlist: Path, params: dict, _job_id: str | None = None) -> SimulationResult:
-        """Run a Spectre simulation on *netlist*.
-
-        Job status is automatically written to ``~/.cache/virtuoso_bridge/jobs/``
-        so that ``virtuoso-bridge sim-jobs`` can display progress.
-        """
+    def run_simulation(self, netlist: Path, params: dict) -> SimulationResult:
+        """Run a Spectre simulation on *netlist* synchronously."""
         netlist = Path(netlist).resolve()
         if not netlist.exists():
             return SimulationResult(
                 status=ExecutionStatus.ERROR,
                 errors=[f"Netlist file not found: {netlist}"],
             )
-
-        # Create job record (unless already created by submit → _run_tracked)
-        job_id = _job_id or uuid.uuid4().hex[:8]
-        if _job_id is None:
-            _write_job(job_id, {
-                "id": job_id,
-                "netlist": netlist.name,
-                "netlist_path": str(netlist),
-                "status": "running",
-                "submitted": datetime.now(timezone.utc).isoformat(),
-                "finished": None,
-                "profile": self._profile,
-                "remote_host": self._remote_host,
-                "remote_user": self._remote_user,
-            })
-
-        try:
-            if self._remote_host:
-                result = self._run_remote(netlist, params)
-            else:
-                result = self._run_local(netlist)
-
-            _update_job(job_id, {
-                "status": "done" if result.status == ExecutionStatus.SUCCESS else "error",
-                "finished": datetime.now(timezone.utc).isoformat(),
-                "result_status": result.status.value,
-                "errors": result.errors[:3] if result.errors else [],
-            })
-            return result
-        except Exception as exc:
-            _update_job(job_id, {
-                "status": "error",
-                "finished": datetime.now(timezone.utc).isoformat(),
-                "errors": [str(exc)],
-            })
-            raise
+        if self._remote_host:
+            return self._run_remote(netlist, params)
+        return self._run_local(netlist)
 
     # -- parallel simulation API ---------------------------------------------
 
@@ -783,16 +591,6 @@ class SpectreSimulator:
                 "Call shutdown() first to apply the new limit."
             )
 
-    def _run_tracked(self, job_id: str, netlist: Path, params: dict) -> SimulationResult:
-        """Run simulation via run_simulation, which handles job tracking."""
-        _update_job(job_id, {
-            "status": "running",
-            "remote_host": self._remote_host,
-            "remote_user": self._remote_user,
-        })
-        # Pass job_id so run_simulation skips creating a duplicate job record
-        return self.run_simulation(netlist, params, _job_id=job_id)
-
     def submit(self, netlist: Path, params: dict | None = None) -> Future[SimulationResult]:
         """Submit a simulation to run in the background.
 
@@ -801,45 +599,19 @@ class SpectreSimulator:
         directory (uuid-based), so there are no file conflicts.  The SSH
         ControlMaster connection is shared automatically.
 
-        Job status is written to ``~/.cache/virtuoso_bridge/jobs/`` so that
-        ``virtuoso-bridge sim-jobs`` can display progress from the terminal.
-
         Example::
 
             sim = SpectreSimulator.from_env()
-
-            # Submit simulations as needed — don't have to batch them
             t1 = sim.submit(Path("tb_comparator.scs"))
             t2 = sim.submit(Path("tb_dac.scs"))
-
-            # Do other work while simulations run...
-
-            # Check without blocking
-            if t1.done():
-                result = t1.result()
-
-            # Or block on a specific one
+            # ... do other work ...
+            result1 = t1.result()
             result2 = t2.result()
-
-            # Submit more while others are still running
-            t3 = sim.submit(Path("tb_sar_logic.scs"))
         """
         pool = self._ensure_pool()
         netlist = Path(netlist).resolve()
         params = params or {}
-        job_id = uuid.uuid4().hex[:8]
-
-        _write_job(job_id, {
-            "id": job_id,
-            "netlist": netlist.name,
-            "netlist_path": str(netlist),
-            "status": "queued",
-            "submitted": datetime.now(timezone.utc).isoformat(),
-            "finished": None,
-            "profile": self._profile,
-        })
-
-        return pool.submit(self._run_tracked, job_id, netlist, params)
+        return pool.submit(self.run_simulation, netlist, params)
 
     def run_parallel(
         self,

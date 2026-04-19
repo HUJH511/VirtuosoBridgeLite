@@ -12,46 +12,6 @@ _OUTPUT_FIELDS = ("name", "type", "signal", "expr",
                   "plot", "save", "eval_type", "unit", "spec")
 
 
-# Waveform-accessor prefixes that map 1:1 to a Spectre analysis.  Order
-# matters only where a longer prefix must be matched before a shorter one
-# (e.g. VDC before V).
-_WAVEFORM_ANALYSIS_PREFIXES = (
-    ("VOP(", "dcOp"),
-    ("IOP(", "dcOp"),
-    ("VDC(", "dc"),
-    ("IDC(", "dc"),
-    ("VS(",  "dc"),
-    ("IS(",  "dc"),
-    ("VT(",  "tran"),
-    ("IT(",  "tran"),
-    ("VF(",  "ac"),
-    ("IF(",  "ac"),
-)
-
-_RESULT_NAME_RE = re.compile(r'\?result\s+"([^"]+)"')
-
-
-def _infer_analysis_from_expr(expr) -> str | None:
-    """Map a SKILL output expression to its source analysis name.
-
-    Preference order:
-      1. An explicit ``?result "NAME"`` argument (e.g. ``stb`` /
-         ``stb_margin`` / ``pnoise`` — any non-default results bucket).
-      2. Waveform accessor prefixes (VF/IF → ac, VT/IT → tran, etc.).
-
-    Returns None when the expression gives no reliable signal.
-    """
-    if not expr or not isinstance(expr, str):
-        return None
-    m = _RESULT_NAME_RE.search(expr)
-    if m:
-        return m.group(1)
-    for prefix, ana in _WAVEFORM_ANALYSIS_PREFIXES:
-        if prefix in expr:
-            return ana
-    return None
-
-
 def _parse_skill_str_list(raw: str) -> list[str]:
     """Parse a flat SKILL list of strings like ("a" "b" "c") -> ['a','b','c']."""
     if not raw:
@@ -295,16 +255,14 @@ def _parse_sev_outputs(raw: str) -> list[dict]:
         raw = dict(zip(_OUTPUT_FIELDS, toks[:len(_OUTPUT_FIELDS)]))
         expr = raw.get("expr")
         kind = "computed" if expr and expr != "nil" else "save-only"
-        # Final shape: ``kind`` up front, then only the non-empty fields,
-        # then an ``analysis`` tag for computed outputs when inferable.
+        # Final shape: ``kind`` up front, then only the non-empty fields.
+        # No analysis-from-expr inference here — that's a domain heuristic
+        # ("VF means ac") that belongs in a downstream consumer, not in
+        # the parser whose job is to mirror Cadence's truth.
         entry: dict = {"kind": kind}
         for k in _OUTPUT_FIELDS:
             v = raw.get(k)
             if v is not None and v != "" and v != []:
                 entry[k] = v
-        if kind == "computed":
-            ana = _infer_analysis_from_expr(entry.get("expr"))
-            if ana:
-                entry["analysis"] = ana
         entries.append(entry)
     return entries
