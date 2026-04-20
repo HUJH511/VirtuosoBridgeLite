@@ -87,6 +87,8 @@ from virtuoso_bridge import VirtuosoClient
 client = VirtuosoClient.from_env()
 
 client.execute_skill('...')                     # run SKILL expression
+client.fetch(expr, fields)                       # batch ~>slot extract (see below)
+client.fetch_one(expr, fields)                   # single-object ~>slot extract
 client.load_il("my_script.il")                  # upload + load .il file
 client.upload_file(local_path, remote_path)      # local → remote
 client.download_file(remote_path, local_path)    # remote → local
@@ -95,6 +97,53 @@ client.run_shell_command("ls /tmp/")             # run shell on remote
 client.list_windows()                            # list all open windows
 client.screenshot(output="output", target="ciw") # screenshot a window
 ```
+
+### Batch attribute fetch: `fetch()` / `fetch_one()`
+
+`execute_skill()` is a raw-string in, raw-string out channel. For DFII
+objects it returns an opaque handle (`"db:0x2800ccbe"`) that's useless
+by itself — to get attributes you'd have to send another SKILL call
+per attribute, which is both verbose and slow (~100 ms per
+round-trip).
+
+**`fetch(expr, fields)`** does the right thing in one round-trip:
+sends `mapcar(lambda((o) list(o~>f1 o~>f2 ...)) <expr>)`, parses the
+SKILL s-expression response, and returns a list of Python dicts.
+
+```python
+# List of selected schematic objects in one call
+objs = client.fetch("geGetSelSet()", ["objType", "cellName", "name"])
+# [{"objType": "inst", "cellName": "nch_mac", "name": "M1"},
+#  {"objType": "inst", "cellName": "pch_mac", "name": "M2"}, ...]
+print(objs[0]["name"])     # → 'M1'
+
+# All instances in the current schematic — 1 call, not N×fields
+insts = client.fetch(
+    "geGetEditCellView()~>instances",
+    ["name", "cellName", "libName", "viewName"],
+)
+```
+
+`fetch_one(expr, fields)` is the single-object variant — wraps in
+`list(...)` and returns one dict:
+
+```python
+cv = client.fetch_one("geGetEditCellView()",
+                      ["libName", "cellName", "viewName"])
+# {"libName": "PLAYGROUND", "cellName": "AMP", "viewName": "schematic"}
+```
+
+**Value decoding** (both methods): strings unquoted, ``nil`` →
+``None``, ``t`` → ``True``, nested SKILL lists → nested Python lists,
+bare atoms (numbers / symbols) returned as strings so the caller can
+coerce (`int(d["fingers"])`).
+
+**Why not a `client["fn"]()` lazy-proxy style (à la `skillbridge`)?**
+Lazy proxies look nicer syntactically but trigger one round-trip per
+attribute access — 100 selected objects × 3 fields = 300 ssh hops
+(~30 s). `fetch` does it all in one hop (~200 ms). If you need the
+REPL-style ergonomics, use `skillbridge` alongside this bridge —
+they coexist fine on the same Virtuoso session.
 
 ### CIW output vs return value
 

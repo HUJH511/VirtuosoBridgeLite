@@ -561,6 +561,72 @@ let((result winName ciwNum)
         effective_timeout = timeout if timeout is not None else self._timeout
         return self.execute_skill(skill_code, timeout=effective_timeout)
 
+    def fetch(self, expr: str, fields: list[str], *,
+              timeout: int | None = None) -> list[dict]:
+        """Run a SKILL expression that returns a **list of objects** and
+        extract the given ``~>slot`` names from each element, all in a
+        single round-trip.
+
+        This is the batch alternative to per-attribute access.  Instead
+        of N round-trips::
+
+            # Slow — each attribute access is one network call.
+            sel = client.execute_skill("geGetSelSet()")   # "db:0x..."
+            for o in each_inst:                           # N × 3 calls
+                name     = client.execute_skill(f"{o}~>name")
+                cellName = client.execute_skill(f"{o}~>cellName")
+                objType  = client.execute_skill(f"{o}~>objType")
+
+        do a single call that pulls every field for every element::
+
+            objs = client.fetch("geGetSelSet()",
+                                ["objType", "cellName", "name"])
+            # [{"objType": "inst", "cellName": "nch_mac", "name": "M1"},
+            #  {"objType": "inst", "cellName": "pch_mac", "name": "M2"},
+            #  ...]
+            print(objs[0]["name"])
+
+        Values are decoded with SKILL s-expression rules: quoted
+        strings are unquoted/unescaped, ``nil`` → ``None``, ``t`` →
+        ``True``, nested lists → nested Python lists, and bare atoms
+        (numbers / symbols) are returned as their original string so
+        the caller can coerce as needed.
+
+        Use :meth:`fetch_one` for single-object expressions.
+        """
+        # Late import: the parser lives under maestro/reader but is
+        # pure and general.  Keeping the import local avoids
+        # constructing the wider maestro package at module load.
+        from virtuoso_bridge.virtuoso.maestro.reader._parse_skill import (
+            _parse_sexpr,
+        )
+        slots = " ".join(f"o~>{f}" for f in fields)
+        sk = f"mapcar(lambda((o) list({slots})) {expr})"
+        raw = self.execute_skill(sk, timeout=timeout).output or ""
+        parsed = _parse_sexpr(raw.strip())
+        if not isinstance(parsed, list):
+            return []
+        return [
+            dict(zip(fields, row))
+            for row in parsed
+            if isinstance(row, list)
+        ]
+
+    def fetch_one(self, expr: str, fields: list[str], *,
+                  timeout: int | None = None) -> dict:
+        """Single-object variant of :meth:`fetch`.  Wraps ``expr`` in
+        a one-element ``list(...)`` and returns the first dict (or an
+        empty dict if the expression yielded nothing).
+
+        Example::
+
+            cv = client.fetch_one("geGetEditCellView()",
+                                  ["libName", "cellName", "viewName"])
+            # {"libName": "PLAYGROUND", "cellName": "AMP", "viewName": "schematic"}
+        """
+        rows = self.fetch(f"list({expr})", fields, timeout=timeout)
+        return rows[0] if rows else {}
+
     def run_shell_command(self, cmd: str, timeout: int | None = None) -> VirtuosoResult:
         effective_timeout = timeout if timeout is not None else self._timeout
         escaped = _escape_skill_string(cmd)
