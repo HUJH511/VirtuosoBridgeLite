@@ -73,6 +73,7 @@ All `virtuoso-bridge` CLI commands and Python scripts must run inside the activa
 4. **`virtuoso-bridge status`** — verify everything is `healthy` before proceeding.
 5. **`virtuoso-bridge windows`** — list all open Virtuoso windows (num + name).
 6. **`virtuoso-bridge screenshot [ciw|current|N]`** — screenshot a window to `output/`. Default: CIW.
+7. **`virtuoso-bridge snapshot -o <dir>`** — dump the currently-focused maestro window to `<dir>/<YYYYMMDD_HHMMSS>__<lib>__<cell>/` (state XMLs, SKILL probe output, per-point netlist + PSF results, `.rdb`). This is the default way to capture Maestro state — no Python required. Use the Python API (below) only inside a multi-step pipeline.
 
 ### Then
 
@@ -316,7 +317,19 @@ data_with_pos = read_schematic(client, LIB, CELL, include_positions=True)
 # No CDF param filtering (return all 200+ PDK params):
 raw = read_schematic(client, LIB, CELL, include_positions=False, param_filters=None)
 
-# 2. Maestro — snapshot the focused window (no session arg needed)
+# 2. Maestro — snapshot the focused window
+#
+# PREFER THE CLI for one-shot captures.  The CLI handles venv + client
+# construction, and on-disk output is everything you need for
+# analysis (state XMLs, SKILL probe text, per-point psf/* results,
+# .rdb, netlist/).  Python for this case is pure boilerplate.
+#
+#   $ virtuoso-bridge snapshot -o output/
+#
+# Use the Python API only when snapshot is one step in a larger
+# same-connection pipeline (e.g. open_session → snapshot →
+# run_simulation → close_session, or a loop over many cells):
+
 from virtuoso_bridge.virtuoso.maestro import snapshot
 d = snapshot(client)                             # SKILL-only, ~150ms, 1 round-trip
 # d["raw_sections"] = [(probe_skill_text, raw_output), ...]
@@ -325,11 +338,14 @@ d = snapshot(client)                             # SKILL-only, ~150ms, 1 round-t
 #   value is the verbatim SKILL alist — no Python parsing.
 # d also has session / lib / cell / view / mode / unsaved.
 
-# Full disk dump (raw + YAML-filtered XMLs + 16 SKILL probes + per-point run files):
+# Full disk dump (raw + YAML-filtered XMLs + 16 SKILL probes + per-point
+# inputs + spectre results + .rdb):
 d = snapshot(client, output_root="output/")      # → d["output_dir"]
 
 # IMPORTANT: snapshot() always uses the CURRENTLY FOCUSED maestro window.
 # Click the desired ADE Assembler first, or use open_session() to bring it up.
+
+# Rule of thumb: one-shot inspection → CLI; multi-step pipeline → Python.
 
 # 3. Netlist — generate from maestro session, download via SSH
 session = open_session(client, LIB, CELL)
