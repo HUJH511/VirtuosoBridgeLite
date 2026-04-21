@@ -178,7 +178,6 @@ class SSHRunner:
         self._ssh_config_path = ssh_config_path
         self._timeout = timeout
         self._connect_timeout = connect_timeout
-        self._persistent_shell_enabled = persistent_shell and os.name != "nt"
         self._verbose = verbose
 
         env_ssh_cmd = _tool_override_from_env("VB_SSH_CMD")
@@ -191,20 +190,8 @@ class SSHRunner:
 
         # ControlMaster socket path for SSH connection multiplexing.
         # All ssh/scp calls to the same host reuse one TCP connection.
-        #
-        # Enabled by default on every OS.  Modern Windows 10/11 OpenSSH
-        # (8.1+) supports ControlMaster via named-pipe ControlPath, so
-        # there is no platform reason to opt out.  Historically this
-        # was default-disabled on Windows after one user hit a WSL-
-        # specific "getsockname failed: Not a socket" error; that
-        # disable was overly broad and cost every Windows user the
-        # multiplexing speedup — fresh ssh / scp calls against a slow
-        # remote (lab PAM stack, heavy load) would take 10-30 s per
-        # handshake, making `status` / snapshot / cell copies look
-        # hung.
-        #
-        # If you actually hit a ControlMaster-related error on your
-        # platform, set VB_DISABLE_CONTROL_MASTER=1.
+        # Enabled by default on every OS; set VB_DISABLE_CONTROL_MASTER=1
+        # to opt out if a specific platform trips mux errors.
         _disable_cm = os.environ.get("VB_DISABLE_CONTROL_MASTER", "").strip().lower() in ("1", "true", "yes")
         _force_cm = os.environ.get("VB_FORCE_CONTROL_MASTER", "").strip().lower() in ("1", "true", "yes")
         self._use_control_master = _force_cm or (not _disable_cm)
@@ -213,10 +200,32 @@ class SSHRunner:
         _tmp = tempfile.gettempdir()
         self._control_path = f"{_tmp}/vb_ssh_{_user_part}@{host}:{jump_host or 'direct'}"
 
+        # Persistent SSH shell = one long-lived ``ssh host sh -s`` subprocess
+        # shared by every run_command call.  Turns N cold handshakes into 1.
+        #
+        # POSIX: always allowed when the caller asks for it.
+        # Windows: historically disabled after stdin-pipe lifetime issues
+        # with ``-J`` + ``ControlMaster=auto`` on native ssh.exe.  Re-enable
+        # *only* when neither of those risk factors is present, i.e. direct
+        # connection with mux off.  Users who need both features can still
+        # set VB_DISABLE_CONTROL_MASTER=1 to trade mux for persistent-shell
+        # on Windows.
+        if os.name == "nt":
+            self._persistent_shell_enabled = (
+                persistent_shell
+                and not self._use_control_master
+                and not jump_host
+            )
+        else:
+            self._persistent_shell_enabled = persistent_shell
+
         if not self._use_control_master:
             logger.debug("ControlMaster disabled (os=%s, env_override=%s)", os.name, _disable_cm)
         if persistent_shell and not self._persistent_shell_enabled:
-            logger.debug("Persistent SSH shell disabled on Windows for host %s", host)
+            logger.debug(
+                "Persistent SSH shell disabled for %s (os=%s, use_cm=%s, jump=%s)",
+                host, os.name, self._use_control_master, bool(jump_host),
+            )
 
         self._shell_proc: subprocess.Popen[Any] | None = None
         self._shell_queue: queue.Queue[str | None] | None = None
@@ -256,6 +265,7 @@ class SSHRunner:
         """
         if remote_port is None:
             remote_port = port
+
         cmd: list[str] = [self._ssh_cmd]
         # Use ControlMaster options — if a master already exists, the slave
         # will request port-forwarding from it and then exit.  The master
@@ -277,14 +287,27 @@ class SSHRunner:
             print(f"[cmd] {' '.join(cmd)}", flush=True)
 
         if os.name == "nt":
+            # Capture stderr so we can surface "banner exchange timeout"
+            # / "permission denied" etc. to the user.  Previously this
+            # was DEVNULL and any failure became an opaque "rc=1".
+            tunnel_stderr_file = tempfile.NamedTemporaryFile(
+                prefix="vb_tunnel_stderr_", suffix=".log", delete=False
+            )
+            tunnel_stderr_path = tunnel_stderr_file.name
+            tunnel_stderr_file.close()
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=open(tunnel_stderr_path, "wb"),
                 **_windows_no_window_kwargs(detached=True, new_process_group=True),
             )
-            jh_settle = max(settle, 3.0) if self._jump_host else settle
+            # Jump-host cold handshakes can exceed 10 s (slow PAM,
+            # flaky banner exchange).  The previous 3 s budget was
+            # below the P50 of observed cold handshakes and made the
+            # tunnel start appear to fail when it was merely still
+            # handshaking.  Align with the probe ConnectTimeout.
+            jh_settle = max(settle, 30.0) if self._jump_host else max(settle, 10.0)
             deadline = time.monotonic() + jh_settle
             while time.monotonic() < deadline:
                 if self.can_reach_port(port):
@@ -307,8 +330,22 @@ class SSHRunner:
             except subprocess.TimeoutExpired:
                 proc.kill()
             rc = proc.poll()
+            stderr_tail = ""
+            try:
+                with open(tunnel_stderr_path, "rb") as f:
+                    raw = f.read().decode("utf-8", errors="replace").strip()
+                if raw:
+                    stderr_tail = " | " + raw.splitlines()[-1]
+            except OSError:
+                pass
+            try:
+                os.unlink(tunnel_stderr_path)
+            except OSError:
+                pass
             detail = f" (rc={rc})" if rc is not None else ""
-            raise RuntimeError(f"SSH tunnel failed to start on Windows{detail}")
+            raise RuntimeError(
+                f"SSH tunnel failed to start on Windows{detail}{stderr_tail}"
+            )
 
         popen_kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
@@ -470,6 +507,28 @@ class SSHRunner:
         if self._verbose:
             print(f"[cmd] {' '.join(cmd)}", flush=True)
 
+    # Transport-level SSH error patterns that indicate a flaky cold
+    # handshake rather than a server-side problem.  Seeing any of these
+    # once is common on shared jump hosts (slow banner, intermittent
+    # TCP reset); a single retry almost always succeeds because the TCP
+    # path and jump-host PAM stack are now warm.  We deliberately
+    # exclude "permission denied" / "host key" / "could not resolve" —
+    # those are real configuration errors and must not be masked.
+    _TRANSIENT_SSH_ERROR_FRAGMENTS = (
+        "connection timed out during banner exchange",
+        "kex_exchange_identification",
+        "connection reset by peer",
+        "connection closed by",
+        "no route to host",
+    )
+
+    @classmethod
+    def _is_transient_ssh_error(cls, returncode: int, stderr: str) -> bool:
+        if returncode == 0:
+            return False
+        low = stderr.lower()
+        return any(fragment in low for fragment in cls._TRANSIENT_SSH_ERROR_FRAGMENTS)
+
     def _run_command_once(self, command: str, timeout: int | None = None) -> CommandResult:
         effective_timeout = timeout or self._timeout
         # Pipe the command to `ssh host sh` via stdin so it always runs in sh
@@ -484,23 +543,48 @@ class SSHRunner:
         # otherwise land on the remote with CRLF line endings, which csh reads
         # as part of the next token (e.g. `source /path/to/cshrc\r` → file not
         # found). On POSIX the behavior is identical to text mode.
-        result = subprocess.run(
-            cmd,
-            input=command.encode("utf-8"),
-            capture_output=True,
-            text=False,
-            timeout=effective_timeout,
-            **_windows_no_window_kwargs(),
-        )
-        stdout = result.stdout.decode("utf-8", errors="replace")
-        stderr = result.stderr.decode("utf-8", errors="replace")
+        #
+        # Retry once on transient SSH transport errors.  Windows OpenSSH
+        # cannot reliably multiplex (getsockname/mux_client_request_session
+        # failures) so each call is a fresh handshake, and cold handshakes
+        # to congested jump hosts occasionally trip "banner exchange
+        # timeout" or "kex_exchange_identification: connection closed".
+        # A second attempt almost always succeeds because the intervening
+        # TCP/KEX state is still warm on the jump.  Without this, a single
+        # flake in any of ``warm()``'s 5-6 sequential SSH calls kills the
+        # whole start, and the user sees a misleading "No Python
+        # interpreter found" (empty detection output).
+        attempts = 2
+        last: subprocess.CompletedProcess[bytes] | None = None
+        for attempt in range(attempts):
+            last = subprocess.run(
+                cmd,
+                input=command.encode("utf-8"),
+                capture_output=True,
+                text=False,
+                timeout=effective_timeout,
+                **_windows_no_window_kwargs(),
+            )
+            stderr_text = last.stderr.decode("utf-8", errors="replace")
+            if not self._is_transient_ssh_error(last.returncode, stderr_text):
+                break
+            if attempt + 1 < attempts:
+                logger.info(
+                    "Transient SSH error on %s (rc=%d); retrying once: %s",
+                    self._host,
+                    last.returncode,
+                    stderr_text.strip().splitlines()[0] if stderr_text.strip() else "",
+                )
+        assert last is not None
+        stdout = last.stdout.decode("utf-8", errors="replace")
+        stderr = last.stderr.decode("utf-8", errors="replace")
         logger.debug(
             "Remote command returned %d (stdout=%d bytes, stderr=%d bytes)",
-            result.returncode,
+            last.returncode,
             len(stdout),
             len(stderr),
         )
-        return CommandResult(returncode=result.returncode, stdout=stdout, stderr=stderr)
+        return CommandResult(returncode=last.returncode, stdout=stdout, stderr=stderr)
 
     def upload(
         self,

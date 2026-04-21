@@ -116,40 +116,19 @@ def cli_init(
 
 # -- start ------------------------------------------------------------------
 
-def _ssh_precheck(profile: str | None = None) -> int | None:
-    """Quick SSH connectivity check. Returns exit code on failure, None on success."""
-    ssh_env = remote_ssh_env_from_os(profile)
-
-    # When a remote target is configured, prefer a single end-to-end probe.
-    # On some Windows/OpenSSH + remote-shell combinations, probing the jump
-    # host alone via ``ssh host -T exit 0`` can false-negative even though the
-    # actual proxied connection to the remote host succeeds.
-    if ssh_env.jump_host and not ssh_env.remote_host:
-        user = ssh_env.jump_user or ssh_env.remote_user
-        runner = SSHRunner(host=ssh_env.jump_host, user=user, connect_timeout=5, persistent_shell=False)
-        if not runner.test_connection():
-            print(f"SSH to jump host {ssh_env.jump_host} failed.")
-            print(f"  Check VB_JUMP_HOST in your .env file.")
-            print(f"  Verify: ssh {user}@{ssh_env.jump_host}")
-            return 1
-
-    if ssh_env.remote_host:
+def _format_ssh_failure(ssh_env) -> None:
+    """Print a user-friendly hint after ``warm`` fails for SSH-shaped reasons."""
+    print(f"SSH to {ssh_env.remote_host} failed.")
+    print(f"  Check VB_REMOTE_HOST and VB_REMOTE_USER in your .env file.")
+    if ssh_env.jump_host:
         jump_user = ssh_env.jump_user or ssh_env.remote_user
-        runner = SSHRunner(
-            host=ssh_env.remote_host, user=ssh_env.remote_user,
-            jump_host=ssh_env.jump_host, jump_user=jump_user,
-            connect_timeout=5, persistent_shell=False,
+        print(
+            f"  Verify: ssh -J {jump_user}@{ssh_env.jump_host} "
+            f"{ssh_env.remote_user}@{ssh_env.remote_host}"
         )
-        if not runner.test_connection():
-            print(f"SSH to {ssh_env.remote_host} failed.")
-            print(f"  Check VB_REMOTE_HOST and VB_REMOTE_USER in your .env file.")
-            if ssh_env.jump_host:
-                print(f"  Verify: ssh -J {jump_user}@{ssh_env.jump_host} {ssh_env.remote_user}@{ssh_env.remote_host}")
-            else:
-                print(f"  Verify: ssh {ssh_env.remote_user}@{ssh_env.remote_host}")
-            print(f"  For a local VM, use the VM's IP (run `ip addr` inside the VM).")
-            return 1
-    return None
+    else:
+        print(f"  Verify: ssh {ssh_env.remote_user}@{ssh_env.remote_host}")
+    print(f"  For a local VM, use the VM's IP (run `ip addr` inside the VM).")
 
 
 def _start_one_profile(profile: str | None) -> int:
@@ -167,11 +146,6 @@ def _start_one_profile(profile: str | None) -> int:
 
     is_local = _is_localhost(remote_host)
 
-    if not is_local:
-        precheck = _ssh_precheck(profile)
-        if precheck is not None:
-            return precheck
-
     if SSHClient.is_running(profile):
         msg = "Bridge already running." if is_local else "Tunnel already running."
         print(msg)
@@ -185,7 +159,22 @@ def _start_one_profile(profile: str | None) -> int:
     ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
     try:
         started = time.monotonic()
-        ssh.warm()
+        try:
+            # No separate SSH precheck — ``warm()`` already performs the
+            # real handshake we need.  Probing first doubled the handshake
+            # count and, on jump-host setups where cold banner exchange
+            # easily exceeds 5 s, made the precheck false-negative while
+            # the actual tunnel would have succeeded.
+            ssh.warm()
+        except Exception as exc:
+            if not is_local:
+                _format_ssh_failure(remote_ssh_env_from_os(profile))
+                msg = str(exc).strip()
+                if msg:
+                    print(f"  Details: {msg.splitlines()[0]}")
+            else:
+                print(f"Local bridge setup failed: {exc}")
+            return 1
         elapsed = time.monotonic() - started
         print(f"tunnel.warm = {_fmt(elapsed)}")
 
@@ -472,9 +461,18 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
         if cadence_cshrc:
             # Keep csh script out of bash's view — ``!`` / backticks /
             # ``$?VAR`` must reach csh verbatim.
+            #
+            # Seed HOSTNAME/LD_LIBRARY_PATH with non-empty placeholders:
+            # some site cshrc files do ``setenv LD_LIBRARY_PATH
+            # ${MMSIM_HOME}/tools/lib:$LD_LIBRARY_PATH`` and csh aborts
+            # partway through when ``$LD_LIBRARY_PATH`` is undefined —
+            # leaving PATH unpatched so ``which spectre`` returns
+            # nothing.  An empty string (``""``) was found insufficient
+            # in practice; ``blank`` is a harmless throwaway that the
+            # subsequent concat safely overwrites.
             csh_script = (
-                'if (! $?HOSTNAME) setenv HOSTNAME `hostname`; '
-                'if (! $?LD_LIBRARY_PATH) setenv LD_LIBRARY_PATH ""; '
+                'setenv HOSTNAME `hostname`; '
+                'setenv LD_LIBRARY_PATH blank; '
                 f'source {cadence_cshrc}; '
                 'which spectre; '
                 'spectre -V'
@@ -484,12 +482,7 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
         else:
             combined = fast
         check_cmd = f"bash -c {shlex.quote(combined)}"
-        # Remote sshd handshake can be 10-25 s on shared lab machines
-        # (slow PAM stack, load, etc.).  Inform the user we're working
-        # so "status" doesn't look frozen, and give the probe enough
-        # time budget to survive the worst observed handshake.
-        print("\n[spectre] probing (up to 60 s — single SSH round-trip)...",
-              flush=True)
+        print("\n[spectre] probing...", flush=True)
         result = runner.run_command(check_cmd, timeout=60)
         stdout = result.stdout.strip()
 
