@@ -1079,6 +1079,18 @@ class SSHRunner:
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=no",
             "-o", f"ConnectTimeout={self._connect_timeout}",
+            # Skip GSSAPI/Kerberos auth.  In many EDA environments the
+            # Kerberos KDC is either unreachable from the client or on
+            # a separate network; when sshd advertises gssapi-* the
+            # client will silently stall 15-30 s waiting for the KDC
+            # before falling back to publickey.  That stall looks to
+            # the caller exactly like "banner exchange timeout" because
+            # ConnectTimeout covers the whole pre-session phase.
+            # We never use GSSAPI here — disable it explicitly.
+            "-o", "GSSAPIAuthentication=no",
+            # Same treatment for hostbased (rarely configured, same
+            # risk of a slow reverse-DNS / IdentityFile probe).
+            "-o", "HostbasedAuthentication=no",
         ]
         if self._use_control_master:
             opts += [
