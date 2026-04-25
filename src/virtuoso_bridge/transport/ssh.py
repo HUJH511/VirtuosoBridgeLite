@@ -175,7 +175,11 @@ class SSHRunner:
         self._jump_host = jump_host
         self._jump_user = jump_user or user
         self._ssh_key_path = ssh_key_path
-        self._ssh_config_path = ssh_config_path
+        # VB_SSH_CONFIG lets users with non-ASCII home paths (e.g. Windows
+        # with CJK usernames where ssh.exe fails to read ~/.ssh/config)
+        # explicitly point at a config file.
+        env_ssh_config = _tool_override_from_env("VB_SSH_CONFIG")
+        self._ssh_config_path = Path(env_ssh_config) if env_ssh_config else ssh_config_path
         self._timeout = timeout
         self._connect_timeout = connect_timeout
         self._verbose = verbose
