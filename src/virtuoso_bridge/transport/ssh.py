@@ -536,14 +536,49 @@ class SSHRunner:
         low = stderr.lower()
         return any(fragment in low for fragment in cls._TRANSIENT_SSH_ERROR_FRAGMENTS)
 
+    # Stderr patterns that mean ControlMaster itself is broken on this
+    # platform (Windows OpenSSH variants, non-ASCII ControlPath, old WSL
+    # without Unix-socket support, NTFS-illegal chars in the socket name,
+    # etc.).  When we see one of these, multiplexing won't work for this
+    # session — fall back to per-call handshakes.  We intentionally don't
+    # treat these as transient: retrying with CM still on would just fail
+    # again the same way.
+    _CM_FAILURE_FRAGMENTS = (
+        "mux_client_request_session",
+        "mux_client_hello_exchange",
+        "mux server has been disabled",
+        "could not create named pipe",
+        "controlpath",  # "ControlPath ... too long", "ControlPath ... not a socket"
+        "controlsocket",
+        "getsockname failed",
+        "not a socket",
+    )
+
+    @classmethod
+    def _is_cm_failure(cls, returncode: int, stderr: str) -> bool:
+        if returncode == 0:
+            return False
+        low = stderr.lower()
+        return any(fragment in low for fragment in cls._CM_FAILURE_FRAGMENTS)
+
+    def _disable_cm_for_session(self, stderr_summary: str) -> None:
+        """Turn off ControlMaster after a runtime failure; warn once."""
+        if not self._use_control_master:
+            return
+        self._use_control_master = False
+        logger.warning(
+            "ControlMaster failed on %s (%s); disabling for this session. "
+            "Set VB_DISABLE_CONTROL_MASTER=1 to silence this warning.",
+            self._host,
+            stderr_summary or "no detail",
+        )
+
     def _run_command_once(self, command: str, timeout: int | None = None) -> CommandResult:
         effective_timeout = timeout or self._timeout
         # Pipe the command to `ssh host sh` via stdin so it always runs in sh
         # regardless of the remote user's login shell (which may be csh).
         # Passing the command as an SSH argument would have the login shell
         # interpret it, breaking sh syntax (&&, ${VAR:-}, etc.) if login=csh.
-        cmd = self._build_ssh_base() + ["sh"]
-        self._print_cmd(cmd)
         logger.info("[server] %s", command)
         # Use bytes (text=False) to bypass Windows universal-newlines translation
         # of '\n' → '\r\n' on stdin. Heredoc payloads (cat > file << EOF ...)
@@ -551,19 +586,21 @@ class SSHRunner:
         # as part of the next token (e.g. `source /path/to/cshrc\r` → file not
         # found). On POSIX the behavior is identical to text mode.
         #
-        # Retry once on transient SSH transport errors.  Windows OpenSSH
-        # cannot reliably multiplex (getsockname/mux_client_request_session
-        # failures) so each call is a fresh handshake, and cold handshakes
-        # to congested jump hosts occasionally trip "banner exchange
-        # timeout" or "kex_exchange_identification: connection closed".
-        # A second attempt almost always succeeds because the intervening
-        # TCP/KEX state is still warm on the jump.  Without this, a single
-        # flake in any of ``warm()``'s 5-6 sequential SSH calls kills the
-        # whole start, and the user sees a misleading "No Python
-        # interpreter found" (empty detection output).
-        attempts = 2
+        # Retry up to 3 times.  Two failure modes deserve a retry:
+        #   - Transient transport flakes ("banner exchange timeout",
+        #     "kex_exchange_identification") on shared jump hosts.  A
+        #     second attempt almost always succeeds because TCP/KEX state
+        #     is now warm.
+        #   - ControlMaster runtime failures (Windows OpenSSH variants,
+        #     bad ControlPath, old WSL).  Retrying with CM still on would
+        #     fail the same way; instead we disable CM for the session
+        #     and rebuild cmd without the mux options, then retry.
+        # 3 attempts = 1 initial + 1 transient retry + 1 post-CM-fallback retry.
+        attempts = 3
         last: subprocess.CompletedProcess[bytes] | None = None
         for attempt in range(attempts):
+            cmd = self._build_ssh_base() + ["sh"]
+            self._print_cmd(cmd)
             last = subprocess.run(
                 cmd,
                 input=command.encode("utf-8"),
@@ -573,15 +610,22 @@ class SSHRunner:
                 **_windows_no_window_kwargs(),
             )
             stderr_text = last.stderr.decode("utf-8", errors="replace")
-            if not self._is_transient_ssh_error(last.returncode, stderr_text):
+            if last.returncode == 0:
                 break
-            if attempt + 1 < attempts:
-                logger.info(
-                    "Transient SSH error on %s (rc=%d); retrying once: %s",
-                    self._host,
-                    last.returncode,
-                    stderr_text.strip().splitlines()[0] if stderr_text.strip() else "",
-                )
+            stderr_first = stderr_text.strip().splitlines()[0] if stderr_text.strip() else ""
+            if self._is_cm_failure(last.returncode, stderr_text):
+                self._disable_cm_for_session(stderr_first)
+                continue
+            if self._is_transient_ssh_error(last.returncode, stderr_text):
+                if attempt + 1 < attempts:
+                    logger.info(
+                        "Transient SSH error on %s (rc=%d); retrying once: %s",
+                        self._host,
+                        last.returncode,
+                        stderr_first,
+                    )
+                continue
+            break
         assert last is not None
         stdout = last.stdout.decode("utf-8", errors="replace")
         stderr = last.stderr.decode("utf-8", errors="replace")
